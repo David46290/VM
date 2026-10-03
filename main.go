@@ -2,6 +2,9 @@ package main
 
 import (
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"log"
 	"os"
 	"path/filepath"
@@ -10,6 +13,19 @@ import (
 var (
 	target_folder = "images"
 )
+
+func validate_file(path string) (image.Image, string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, "", err
+	}
+	defer file.Close()
+	img, format, err := image.Decode(file)
+	if err != nil {
+		return nil, "", err
+	}
+	return img, format, nil
+}
 
 func main() {
 	current_dir, _ := os.Getwd()
@@ -21,11 +37,20 @@ func main() {
 	if err != nil {
 		log.Fatalf("Can't read target folder: %v\n", err)
 	}
-	file_count := 0
+	entry_count := 0
 	for _, entry := range entries {
-		if !entry.IsDir() {
-			file_count++
+		if entry.IsDir() {
+			continue
 		}
+		name := entry.Name()
+		path := filepath.Join(target_dir, name)
+		img, format, err := validate_file(path)
+		if err != nil {
+			fmt.Printf("File %s is not a valid image.\n", name)
+			continue
+		}
+
+		entry_count++
 	}
-	fmt.Printf("Number of images in target folder: %d\n", file_count)
+	fmt.Printf("Number of images in target folder: %d\n", entry_count)
 }
