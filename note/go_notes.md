@@ -125,3 +125,81 @@ if err != nil {
 - 若 PowerShell 顯示 `git` 不是命令，代表 Git 未安裝或未加入 PATH。安裝 Git for Windows 後重新開啟 VS Code，再用 `git --version` 確認。
 - 上傳前要檢查是否包含密碼、token 或其他不應公開的檔案；公開 repo 會讓任何人都能看到內容。
 - Copilot 帳號的個人用量無法從本機專案或聊天中查出；應登入 GitHub 帳戶查看方案與用量頁面。模型 context window 是單次對話容量，不等同帳號的月度用量額度。
+
+## 圖片型別、色彩分量與通道
+
+### `image.Image` 與 `ColorModel()` 各代表什麼？
+
+`image.Image` 是介面，定義所有圖片都能提供的基本操作，例如 `Bounds()`、`At(x, y)`、`ColorModel()`。它不公開每種圖片的底層儲存方式；JPEG 解碼後可能得到 `*image.YCbCr`，其他格式或解碼器也可能使用不同實作。
+
+`ColorModel()` 回傳 `color.Model`，用途是把顏色轉換成某種表示方式，不是描述影像有幾個通道或列出底層像素資料。方法不會像 struct 欄位一樣在 debugger 展開時出現。要知道實際型別可用：
+
+```go
+fmt.Printf("image type: %T\n", img)
+```
+
+### Y、Cb、Cr 是什麼？
+
+YCbCr 有三個色彩分量：
+
+- `Y`：亮度分量。
+- `Cb`：藍色差異分量。
+- `Cr`：紅色差異分量。
+
+Go 的 `*image.YCbCr` 以 `Y`、`Cb`、`Cr` 三個 `[]uint8` 切片儲存樣本。`Y` 通常每個像素位置有一個亮度樣本；`Cb`、`Cr` 可能因色度子取樣而少很多。例如 4:2:0 中，一個色度樣本大致由 2×2 個亮度位置共用。用 `SubsampleRatio` 查看子取樣方式。
+
+概念上 YCbCr 有三個分量，但切片長度還會受到影像矩形範圍、每列 stride 等儲存細節影響，不能單靠 `len` 推算通道數或每像素資料大小。
+
+### 「通道數」要先說明指哪一種
+
+通道數會依問題的語境不同而有不同意思：色彩模型的分量數、底層影像的儲存平面／樣本，或像素取樣後提供的顏色值。`image.Image` 是抽象介面，因此不存在一個對所有實作都通用、能由介面直接取得的儲存通道數。
+
+例如 YCbCr 有 Y/Cb/Cr 三個分量，但 Cb、Cr 可以子取樣；`image.RGBA` 有 R/G/B/A 四個儲存分量；灰階圖片通常只有亮度值；調色盤圖片可能儲存索引，再透過 palette 對應顏色。因此「RGBA 是四個分量」不等於每種情境下都應把圖片描述成四個同等意義的色彩通道，alpha 是透明度資訊。
+
+若目標是取得像素呈現的顏色，不必知道底層如何儲存，可以呼叫：
+
+```go
+r, g, b, a := img.At(x, y).RGBA()
+```
+
+它回傳標準化的 RGBA 數值（各為 16-bit 範圍），不表示原始圖片一定以 RGBA 四通道格式儲存。
+
+### 用 type switch 檢查具體圖片型別
+
+介面值可以裝入不同的具體型別；type switch 會依執行時裝入的型別分支：
+
+```go
+switch typedImg := img.(type) {
+case *image.YCbCr:
+	fmt.Println(typedImg.SubsampleRatio)
+case *image.RGBA:
+	fmt.Println("RGBA representation")
+case *image.Gray:
+	fmt.Println("grayscale representation")
+default:
+	fmt.Printf("other representation: %T\n", typedImg)
+}
+```
+
+在每個 `case` 裡，`typedImg` 會是該 case 指定的型別。`image.YCbCr` 是 struct 型別；`*image.YCbCr` 是指向該 struct 的指標，不是路徑。兩者是不同型別。解碼器常回傳指標型別，所以要用 `%T` 或 type switch 確認實際型別。Go 會自動處理指標 struct 的欄位存取，例如 `typedImg.SubsampleRatio`。
+
+### 在 debugger 裡檢視方法和結果
+
+VS Code 的 Go debugger 使用 Delve。變數展開主要顯示欄位，不會列出方法；`Bounds()`、`ColorModel()` 是方法，不是圖片 struct 裡的資料欄位。Debug Console 直接求值方法呼叫可能被拒絕（例如提示需使用 `call`），而且方法呼叫支援受 debugger 限制。
+
+較穩定的檢查方式是在程式碼中先保存結果，再於下一行設中斷點：
+
+```go
+bounds := img.Bounds()
+colorModel := img.ColorModel()
+```
+
+接著在 Variables 面板查看 `bounds` 或 `colorModel` 的實際值。若要知道可用方法或型別定義，可對型別按 F12，使用 IntelliSense，或查文件：
+
+```powershell
+go doc image.Image
+go doc image.YCbCr
+go doc image.Rectangle
+```
+
+通常先看介面／變數型別，再檢查具體型別或方法的回傳型別即可，不需要從標準函式庫逐個型別盲查。
