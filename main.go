@@ -9,15 +9,20 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 )
 
 var (
 	target_folder         = "images"
 	supported_img_type    = [2]string{"jpeg", "png"}
 	histo_folder          = "output/debug/histogram"
-	channel_bit           = 4             // bit depth for each channel (default 4 for histogram generation)
+	channel_bit           = 2             // bit depth for each channel (default 4 for histogram generation)
 	channel_bit_threshold = [2]int{1, 10} //max 10 to prevent overflow of uint32 in histogram key
 	default_channel_bit   = 16
+	// bit position for each channel in the histogram key, 2: leftmost, 0: rightmost
+	channel_bit_place_r = 2
+	channel_bit_place_g = 1
+	channel_bit_place_b = 0
 )
 
 func validate_file(path string) (image.Image, string, error) {
@@ -31,29 +36,6 @@ func validate_file(path string) (image.Image, string, error) {
 		return nil, "", err
 	}
 	return img, format, nil
-}
-
-func image_type(img image.Image) (int8, error) {
-	switch typedImg := img.(type) {
-	case *image.YCbCr:
-		fmt.Printf("YCbCr planes: Y=%d, Cb=%d, Cr=%d\n",
-			len(typedImg.Y), len(typedImg.Cb), len(typedImg.Cr))
-		fmt.Printf("subsample ratio: %v\n", typedImg.SubsampleRatio)
-		return 3, nil
-	case *image.RGBA:
-		fmt.Println("RGBA storage: 4 channels")
-		return 4, nil
-	case *image.NRGBA:
-		fmt.Println("NRGBA storage: 4 channels")
-		return 4, nil
-	case *image.Gray:
-		fmt.Println("Gray storage: 1 channel")
-		return 1, nil
-	default:
-		fmt.Printf("Other image representation: %T\n", typedImg)
-		return 0, fmt.Errorf("unsupported image representation: %T", typedImg)
-	}
-
 }
 
 func map_sort_keys(m map[uint32]int) ([]uint32, error) {
@@ -91,7 +73,7 @@ func img_histogram(img image.Image) (map[uint32]int, []uint32, error) {
 			g_shrink := g >> (default_channel_bit - channel_bit)
 			b_shrink := b >> (default_channel_bit - channel_bit)
 			// Create a simple histogram key (you might want a more sophisticated approach)
-			key := (r_shrink << (2 * channel_bit)) | (g_shrink << channel_bit) | b_shrink
+			key := (r_shrink << (channel_bit_place_r * channel_bit)) | (g_shrink << (channel_bit_place_g * channel_bit)) | (b_shrink << (channel_bit_place_b * channel_bit))
 			histogram[key]++
 
 		}
@@ -119,6 +101,23 @@ func image_detail(img image.Image, format string) (map[uint32]int, []uint32, err
 	return histogram, hist_keys_sorted, nil
 }
 
+func hist_key_decode(key uint32) (uint32, uint32, uint32) {
+	// Decode the histogram key back into RGB values
+	// Push specific bits to the right (amount of channel_bit_place)
+	// Then mask with (1 << channel_bit) - 1 to get the original value
+	r := (key >> (channel_bit_place_r * channel_bit)) & ((1 << channel_bit) - 1)
+	g := (key >> (channel_bit_place_g * channel_bit)) & ((1 << channel_bit) - 1)
+	b := (key >> (channel_bit_place_b * channel_bit)) & ((1 << channel_bit) - 1)
+	return r, g, b
+}
+
+func bright_percentage(value uint32) float64 {
+	// Normalize the value to the range [0, 1] based on channel_bit
+	// channel depth = channel_bit, so max value (brightest) = 2^channel_bit - 1
+	max_value := (1 << channel_bit) - 1
+	return float64(value) / float64(max_value)
+}
+
 func save_histogram(histogram map[uint32]int, hist_keys_sorted []uint32, filename string) error {
 	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
 		return err
@@ -129,10 +128,13 @@ func save_histogram(histogram map[uint32]int, hist_keys_sorted []uint32, filenam
 	}
 	defer file.Close()
 
-	hexWidth := (3*channel_bit + 3) / 4
 	for _, key := range hist_keys_sorted {
 		count := histogram[key]
-		_, err := fmt.Fprintf(file, "Color: 0x%0*X, Count: %d\n", hexWidth, key, count)
+		r, g, b := hist_key_decode(key)
+		r_percentage := bright_percentage(r)
+		g_percentage := bright_percentage(g)
+		b_percentage := bright_percentage(b)
+		_, err := fmt.Fprintf(file, "RGB: (%.2f, %.2f, %.2f), Count: %d\n", r_percentage, g_percentage, b_percentage, count)
 		if err != nil {
 			return fmt.Errorf("error writing to histogram file: %v\n", err)
 		}
@@ -151,7 +153,7 @@ func main() {
 	if err := check_settings(); err != nil {
 		log.Fatalf("Invalid settings: %v\n", err)
 	}
-	histo_folder := fmt.Sprintf("%s_%d_bits_each", histo_folder, channel_bit)
+	histo_folder := fmt.Sprintf("%s_%d_bits_each_rgb", histo_folder, channel_bit)
 	current_dir, _ := os.Getwd()
 	target_dir, _ := filepath.Abs(target_folder)
 	fmt.Printf("Current working directory: %s\n", current_dir)
@@ -163,6 +165,7 @@ func main() {
 	}
 
 	entry_count := 0
+	start := time.Now()
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -179,13 +182,15 @@ func main() {
 			fmt.Printf("Error processing image %s: %v\n", name, err)
 			continue
 		}
-		hist_save_name := filepath.Join(histo_folder, fmt.Sprintf("%s_%d_bits_each.txt", name, channel_bit))
+		hist_save_name := filepath.Join(histo_folder, fmt.Sprintf("%s_%d_bits_each_rgb.txt", name, channel_bit))
 		err_save_hist := save_histogram(histo, hist_keys_sorted, hist_save_name)
 		if err_save_hist != nil {
 			fmt.Printf("Error saving histogram for image %s: %v\n", name, err_save_hist)
 		}
-		fmt.Printf("%s: %s\n", name, format)
+		// fmt.Printf("%s: %s\n", name, format)
 		entry_count++
 	}
+	elapsed := time.Since(start)
 	fmt.Printf("Number of images in target folder: %d\n", entry_count)
+	fmt.Printf("Elapsed time: %v\n", elapsed)
 }

@@ -35,15 +35,17 @@
 
 - [x] 實作 histogram 函式（規格與設計抉擇見 `histogram_and_clustering.md`）：採 3D 聯合 histogram，每通道保留高 `channel_bit` 個 bit 打包成一個 key，存成 `map[uint32]int`（key → count），存檔前排序 key
 - [x] 不同 bit 設定的產出分目錄存放、目錄與檔名都帶 bit 數，避免參數不同的特徵互相污染；舊版未量化產物已清除、產物目錄已加入 `.gitignore`
-- [x] bit 數實驗：同一張圖掃過 `channel_bit` 2–6，記錄 distinct key 數（數據與 \(8^b\) 推導見 `histogram_and_clustering.md` 第 1_1 節）；暫定預設 `channel_bit = 4`，正式定案等 Phase 2
+- [x] bit 數實驗：同一張圖掃過 `channel_bit` 2–6，記錄 distinct key 數（數據與 \(8^b\) 推導見 `histogram_and_clustering.md` 第 1_1 節）；暫定候選 `channel_bit = 4`，正式定案等 Phase 2（程式目前停在 2，是 decode／效能實驗的設定）
+- [x] `hist_key_decode` 把 key 拆回三通道階級，存檔改輸出人類可讀的 `(R, G, B)` 比例形式（數據見第 1_2 節）
+- [x] 熱迴圈效能修正：通道位置由字串 map 改為固定變數，`channel_bit = 2` 整批實測快約 10 秒（細節見 `histogram_and_clustering.md` 效能備忘）
 - [ ] 特徵 struct 從第一天就把路徑和特徵綁在一起（之後 goroutine 結果是亂序的，靠這個對回檔案）
-- [ ] 正規化：目前存的是原始 count，算距離前要除以總像素數（留到 Phase 2 一起做）
+- [ ] 正規化：目前存的是原始 count，算距離前要除以總像素數（留到 Phase 2 一起做；注意 `bright_percentage` 是顏色座標縮放，不是這件事）
 
 驗收標準（三個自我測試全過才算完成）：
 
 - [x] 同一張圖複製改名，兩份 histogram 完全相同（排序存檔後逐行比對一致）
 - [x] 所有 count 總和 = 寬 × 高（由 `hist_count_inspect` 在程式內自動驗證；正規化版本「總和 ≈ 1.0」尚未做，併入上方正規化待辦）
-- [ ] 明顯偏紅 vs 明顯偏藍的圖，高峰落在預期的 bin 附近
+- [x] 明顯偏紅 vs 明顯偏藍的圖，簽名 bin 符合預期（紅圖的純強紅格約 8.9% vs 藍圖 0.3%；同時觀察到含量最大的其實是近黑／中性灰的背景格，見 `histogram_and_clustering.md` 第 1_2 節）
 
 這一階段**不要**碰 goroutine、不要碰分群演算法。
 
