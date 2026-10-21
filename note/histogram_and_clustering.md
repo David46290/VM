@@ -13,8 +13,8 @@
 ## Histogram 函式的規格（Phase 1）
 
 - 輸入：一個 `image.Image`。
-- 輸出：一個 `[]float64`，每個元素是「落在該顏色區間的像素佔全圖的比例」。
-- 正規化：全部元素總和 ≈ 1.0。沒有正規化，不同尺寸的圖沒法互相比較。
+- 輸出：一個 `map[uint32]float64`，每個 key 是量化後的顏色格、value 是「落在該格的像素佔全圖的比例」。（原先規劃寫 `[]float64`，實作改採稀疏 map，只存非零格。）
+- 正規化：全部 value 總和 ≈ 1.0。沒有正規化，不同尺寸的圖沒法互相比較。
 - 逐像素取色用 `img.At(x, y).RGBA()`，不需要知道底層型別是 YCbCr 還是 RGBA（見 `go_pitfalls_checklist.md`）。
 
 ## 必須自己做的三個設計決定
@@ -36,12 +36,13 @@
 **實作現況（2026-10-21）**：
 
 - 每個通道保留高 `channel_bit` 個 bit（從 `RGBA()` 的 16-bit 值直接右移 `16 - channel_bit`），再依 R、G、B 順序打包成一個 key：R 在最高位段、G 在中間、B 在最低位段，key 總寬度為 `3 * channel_bit` bits。
-- 資料型態是 `map[uint32]int`（key → 像素 count），存檔時先把 key 排序再逐行寫出，所以同一張圖重跑、或原圖與複製檔，產出的文字檔可以直接逐行比對。
-- 不同 bit 設定輸出到不同目錄、檔名也帶 bit 數，例如 `output/debug/histogram_4_bits_each/20230826_233548.jpg_4_bits_each.txt`，避免不同參數的特徵混在一起互相污染。
+- 計算過程先累積 `map[uint32]int`（key → 像素 count），再正規化成 `map[uint32]float64` 對外回傳（見下）。存檔時先把 key 排序再逐行寫出，所以同一張圖重跑、或原圖與複製檔，產出的文字檔可以直接逐行比對。
+- 不同 bit 設定輸出到不同目錄、檔名也帶 bit 數（目前程式的格式為 `output/debug/histogram_4_bits_each_rgb_norm/..._4_bits_each_rgb_norm.txt`；先前 bit 實驗的目錄是 `histogram_<b>_bits_each`），避免不同參數的特徵混在一起互相污染。
 - `channel_bit` 合法範圍目前設 1–10（上限 10 是因為 `3 * 10 = 30` bits 還塞得進 `uint32`，再大 key 打包會溢位），啟動時由 `check_settings()` 先檢查。
 - 後續加入 `hist_key_decode`：用打包時相同的位移量右移、再用遮罩 `(1 << channel_bit) - 1` 取出各通道的量化階級，是打包的逆運算（可用 round-trip 重組回原 key 自我驗證）。通道在 key 中的位置改用三個獨立變數（R=2、G=1、B=0）表達，不再用字串 map 查表（效能原因見下方效能備忘）。
-- 存檔時用 `bright_percentage` 把通道階級除以最大階級（\(2^{channel\_bit}-1\)）換成 0–1 的比例方便肉眼判讀，輸出格式為 `RGB: (r, g, b), Count: n`，目錄後綴改為 `_bits_each_rgb`。注意這是「顏色座標」的縮放，**不是** histogram 正規化。
-- 產出存的仍是原始 count，**histogram 本身尚未正規化**；已由 `hist_count_inspect` 驗證所有 count 總和等於寬 × 高。正規化（每個 count 除以總像素數）留到 Phase 2 算距離之前必須補上，兩種「normalize」不要混為一談。
+- 存檔時用 `bright_percentage` 把通道階級除以最大階級（\(2^{channel\_bit}-1\)）換成 0–1 的比例方便肉眼判讀，輸出格式為 `RGB: (r, g, b), contribution: v`（v 目前印到小數 5 位），目錄後綴為 `_bits_each_rgb_norm`。注意 `bright_percentage` 是「顏色座標」的縮放，**不是** histogram 正規化，兩種 normalize 不要混為一談。
+- **正規化設計（里程碑，2026-10-21）**：`img_histogram` 內部仍逐像素累積 int count、並以 `hist_count_inspect` 驗證總和等於寬 × 高，但對外一律回傳正規化後的 `map[uint32]float64`，把它定為全專案唯一標準表示。理由：下游每個函式只需認一種型態，不必為 `map[uint32]int` 與 `map[uint32]float64` 各寫一份複製邏輯，也避免呼叫端忘了轉換而混用 count 與比例。代價是原始 count 與總像素數在離開 `img_histogram` 後不可逆地遺失，之後若需要圖片尺寸，應在特徵 struct 另外記錄。
+- 正規化作法：`hist_normalize` 以「count 的實際總和」為分母逐格相除，不使用寬 × 高；如此即使之後改為取樣或只算局部區域，總和仍由資料本身保證為 1。轉換後再由 `hist_normalize_check` 以常數 `epsilon = 1e-9` 驗證所有比例總和 ≈ 1.0（浮點比較不用 `==`）。
 
 **實驗紀錄（2026-10-21）**：樣本圖 `20230826_233548.jpg`，固定同一張圖、只改 `channel_bit`，統計產出檔案的行數（即實際出現過的 distinct key 數）：
 
@@ -60,7 +61,7 @@
 - bit 太多時同一個顏色家族被切碎：5–6 bit 時，鄰近色被拆到大量相鄰格子，兩張視覺上很像的照片可能因 JPEG 雜訊／光線小偏移而落在不同格 → 距離被高估，「把像的誤判成不像」。
 - 分群品質就是在上面兩種錯誤之間取捨，沒有標準答案，要靠 Phase 2 的距離報告實測決定。
 
-**目前定案狀態**：`channel_bit = 4` 為暫定候選（879 格對這張圖算是「有解析度又不稀疏」的位置），但這只是暫定，正式定案要等 Phase 2 距離報告出來、人工判讀過後再拍板。注意程式裡的 `channel_bit` 目前停在 2，那是後續 key decode 與效能實驗用的設定，不是最終定案值，改動時要意識到自己現在跑的是哪個設定。
+**目前定案狀態**：`channel_bit = 4` 為暫定候選，程式目前也設為 4（879 格對這張圖算是「有解析度又不稀疏」的位置）。實驗與除錯過程中曾暫用 2 做 key decode 對照與熱迴圈效能測試，但它不是目前的執行設定。4 仍只是暫定，正式定案要等 Phase 2 距離報告出來、人工判讀過後再拍板。
 
 **公式推導：為什麼理論格子數是 \(8^b\)**
 
