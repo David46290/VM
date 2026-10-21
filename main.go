@@ -6,17 +6,20 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
 	"time"
 )
 
+const epsilon = 1e-9
+
 var (
 	target_folder         = "images"
 	supported_img_type    = [2]string{"jpeg", "png"}
 	histo_folder          = "output/debug/histogram"
-	channel_bit           = 2             // bit depth for each channel (default 4 for histogram generation)
+	channel_bit           = 4             // bit depth for each channel (default 4 for histogram generation)
 	channel_bit_threshold = [2]int{1, 10} //max 10 to prevent overflow of uint32 in histogram key
 	default_channel_bit   = 16
 	// bit position for each channel in the histogram key, 2: leftmost, 0: rightmost
@@ -38,7 +41,7 @@ func validate_file(path string) (image.Image, string, error) {
 	return img, format, nil
 }
 
-func map_sort_keys(m map[uint32]int) ([]uint32, error) {
+func map_sort_keys(m map[uint32]float64) ([]uint32, error) {
 	keys := make([]uint32, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
@@ -62,7 +65,30 @@ func hist_count_inspect(histogram map[uint32]int, bounds image.Rectangle) error 
 	return nil
 }
 
-func img_histogram(img image.Image) (map[uint32]int, []uint32, error) {
+func hist_normalize_check(histogram map[uint32]float64) error {
+	sum := 0.0
+	for _, magnitude := range histogram {
+		sum += magnitude
+	}
+	if math.Abs(sum-1.0) > epsilon {
+		return fmt.Errorf("histogram is not normalized: sum = %f", sum)
+	}
+	return nil
+}
+
+func hist_normalize(histogram map[uint32]int) map[uint32]float64 {
+	count_total := 0
+	for _, c := range histogram {
+		count_total += c
+	}
+	normalized := make(map[uint32]float64)
+	for key, count := range histogram {
+		normalized[key] = float64(count) / float64(count_total)
+	}
+	return normalized
+}
+
+func img_histogram(img image.Image) (map[uint32]float64, []uint32, error) {
 	histogram := make(map[uint32]int)
 	bounds := img.Bounds()
 	for idx_x := bounds.Min.X; idx_x < bounds.Max.X; idx_x++ {
@@ -81,15 +107,18 @@ func img_histogram(img image.Image) (map[uint32]int, []uint32, error) {
 	if err := hist_count_inspect(histogram, bounds); err != nil {
 		return nil, nil, err
 	}
-	sorted_keys, err := map_sort_keys(histogram)
+	histogram_norm := hist_normalize(histogram)
+	if err := hist_normalize_check(histogram_norm); err != nil {
+		return nil, nil, err
+	}
+	sorted_keys, err := map_sort_keys(histogram_norm)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	return histogram, sorted_keys, nil
+	return histogram_norm, sorted_keys, nil
 }
 
-func image_detail(img image.Image, format string) (map[uint32]int, []uint32, error) {
+func image_detail(img image.Image, format string) (map[uint32]float64, []uint32, error) {
 	// get width, height, histogram
 	if !slices.Contains(supported_img_type[:], format) {
 		return nil, nil, fmt.Errorf("unsupported image format: %s\n", format)
@@ -118,7 +147,7 @@ func bright_percentage(value uint32) float64 {
 	return float64(value) / float64(max_value)
 }
 
-func save_histogram(histogram map[uint32]int, hist_keys_sorted []uint32, filename string) error {
+func save_histogram(histogram map[uint32]float64, hist_keys_sorted []uint32, filename string) error {
 	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
 		return err
 	}
@@ -134,7 +163,7 @@ func save_histogram(histogram map[uint32]int, hist_keys_sorted []uint32, filenam
 		r_percentage := bright_percentage(r)
 		g_percentage := bright_percentage(g)
 		b_percentage := bright_percentage(b)
-		_, err := fmt.Fprintf(file, "RGB: (%.2f, %.2f, %.2f), Count: %d\n", r_percentage, g_percentage, b_percentage, count)
+		_, err := fmt.Fprintf(file, "RGB: (%.3f, %.3f, %.3f), contribution: %.5f\n", r_percentage, g_percentage, b_percentage, count)
 		if err != nil {
 			return fmt.Errorf("error writing to histogram file: %v\n", err)
 		}
@@ -153,7 +182,7 @@ func main() {
 	if err := check_settings(); err != nil {
 		log.Fatalf("Invalid settings: %v\n", err)
 	}
-	histo_folder := fmt.Sprintf("%s_%d_bits_each_rgb", histo_folder, channel_bit)
+	histo_folder := fmt.Sprintf("%s_%d_bits_each_rgb_norm", histo_folder, channel_bit)
 	current_dir, _ := os.Getwd()
 	target_dir, _ := filepath.Abs(target_folder)
 	fmt.Printf("Current working directory: %s\n", current_dir)
@@ -182,7 +211,7 @@ func main() {
 			fmt.Printf("Error processing image %s: %v\n", name, err)
 			continue
 		}
-		hist_save_name := filepath.Join(histo_folder, fmt.Sprintf("%s_%d_bits_each_rgb.txt", name, channel_bit))
+		hist_save_name := filepath.Join(histo_folder, fmt.Sprintf("%s_%d_bits_each_rgb_norm.txt", name, channel_bit))
 		err_save_hist := save_histogram(histo, hist_keys_sorted, hist_save_name)
 		if err_save_hist != nil {
 			fmt.Printf("Error saving histogram for image %s: %v\n", name, err_save_hist)
