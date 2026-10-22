@@ -3,3 +3,4 @@ images/
 VM.exe
 output/
 __debug_bin.exe
+.vscode/

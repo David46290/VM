@@ -5,7 +5,6 @@ import (
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
-	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -18,7 +17,6 @@ const epsilon = 1e-9
 var (
 	target_folder         = "images"
 	supported_img_type    = [2]string{"jpeg", "png"}
-	histo_folder          = "output/debug/histogram"
 	channel_bit           = 4             // bit depth for each channel (default 4 for histogram generation)
 	channel_bit_threshold = [2]int{1, 10} //max 10 to prevent overflow of uint32 in histogram key
 	default_channel_bit   = 16
@@ -26,6 +24,9 @@ var (
 	channel_bit_place_r = 2
 	channel_bit_place_g = 1
 	channel_bit_place_b = 0
+	folder_suffix       = "bits_each_rgb_norm"
+	histo_folder        = filepath.Join("output/debug/histogram", fmt.Sprintf("%d_%s", channel_bit, folder_suffix))
+	histo_save_suffix   = "bits_each_rgb_norm.txt"
 )
 
 func validate_file(path string) (image.Image, string, error) {
@@ -178,19 +179,13 @@ func check_settings() error {
 	return nil
 }
 
-func main() {
-	if err := check_settings(); err != nil {
-		log.Fatalf("Invalid settings: %v\n", err)
+func generate_histo(target_dir string) error {
+	if err := os.MkdirAll(histo_folder, 0o755); err != nil {
+		return fmt.Errorf("error creating histogram folder: %v\n", err)
 	}
-	histo_folder := fmt.Sprintf("%s_%d_bits_each_rgb_norm", histo_folder, channel_bit)
-	current_dir, _ := os.Getwd()
-	target_dir, _ := filepath.Abs(target_folder)
-	fmt.Printf("Current working directory: %s\n", current_dir)
-	fmt.Printf("Target folder: %s\n", target_dir)
-
 	entries, err := os.ReadDir(target_dir)
 	if err != nil {
-		log.Fatalf("Can't read target folder: %v\n", err)
+		return fmt.Errorf("can't read target folder: %v\n", err)
 	}
 
 	entry_count := 0
@@ -203,18 +198,18 @@ func main() {
 		path := filepath.Join(target_dir, name)
 		img, format, err := validate_file(path)
 		if err != nil {
-			fmt.Printf("File %s is not a valid image.\n", name)
+			fmt.Printf("file %s is not a valid image.\n", name)
 			continue
 		}
 		histo, hist_keys_sorted, err := image_detail(img, format)
 		if err != nil {
-			fmt.Printf("Error processing image %s: %v\n", name, err)
+			fmt.Printf("error processing image %s: %v\n", name, err)
 			continue
 		}
-		hist_save_name := filepath.Join(histo_folder, fmt.Sprintf("%s_%d_bits_each_rgb_norm.txt", name, channel_bit))
+		hist_save_name := filepath.Join(histo_folder, fmt.Sprintf("%s_%d_%s", name, channel_bit, histo_save_suffix))
 		err_save_hist := save_histogram(histo, hist_keys_sorted, hist_save_name)
 		if err_save_hist != nil {
-			fmt.Printf("Error saving histogram for image %s: %v\n", name, err_save_hist)
+			fmt.Printf("error saving histogram for image %s: %v\n", name, err_save_hist)
 		}
 		// fmt.Printf("%s: %s\n", name, format)
 		entry_count++
@@ -222,4 +217,22 @@ func main() {
 	elapsed := time.Since(start)
 	fmt.Printf("Number of images in target folder: %d\n", entry_count)
 	fmt.Printf("Elapsed time: %v\n", elapsed)
+	return nil
+}
+
+func main() {
+	if err := check_settings(); err != nil {
+		fmt.Printf("Invalid settings: %v\n\n", err)
+		os.Exit(1)
+	}
+
+	current_dir, _ := os.Getwd()
+	target_dir, _ := filepath.Abs(target_folder)
+	fmt.Printf("Current working directory: %s\n", current_dir)
+	fmt.Printf("Target folder: %s\n", target_dir)
+	histo_err := generate_histo(target_dir)
+	if histo_err != nil {
+		fmt.Printf("error generating histogram: %v\n\n", histo_err)
+		os.Exit(1)
+	}
 }
