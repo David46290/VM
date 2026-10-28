@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -66,9 +67,9 @@ func histCountInspect(histogram map[uint32]int, bounds image.Rectangle) error {
 
 	imgHeight := bounds.Max.Y - bounds.Min.Y
 	imgWidth := bounds.Max.X - bounds.Min.X
-	expected_count := imgHeight * imgWidth
-	if sum != expected_count {
-		return fmt.Errorf("histogram count mismatch: expected %d, got %d", expected_count, sum)
+	expectedCount := imgHeight * imgWidth
+	if sum != expectedCount {
+		return fmt.Errorf("histogram count mismatch: expected %d, got %d", expectedCount, sum)
 	}
 	return nil
 }
@@ -157,11 +158,11 @@ func brightPercentage(value uint32) float64 {
 	return float64(value) / float64(maximum)
 }
 
-func saveHistogram(imageHist ImageHist, filename string) error {
-	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
-		return err
-	}
-	file, err := os.Create(filename)
+func saveHistogramFile(imageHist ImageHist) error {
+	base := filepath.Base(imageHist.Path)
+	name := strings.TrimSuffix(base, filepath.Ext(base))
+	histSaveName := filepath.Join(histoFolder, fmt.Sprintf("%s_%d_%s", name, channelBitDepth, histoSaveSuffix))
+	file, err := os.Create(histSaveName)
 	if err != nil {
 		return fmt.Errorf("error creating histogram file: %v\n", err)
 	}
@@ -185,6 +186,17 @@ func saveHistogram(imageHist ImageHist, filename string) error {
 	}
 	return nil
 }
+func saveHistogram(albumHisto []ImageHist) error {
+	if err := os.MkdirAll(histoFolder, 0o755); err != nil {
+		return err
+	}
+	for _, imageHist := range albumHisto {
+		if err := saveHistogramFile(imageHist); err != nil {
+			return fmt.Errorf("error saving histogram file: %v\n", err)
+		}
+	}
+	return nil
+}
 
 func checkSettings() error {
 	if channelBitDepth < channelBitDepthThreshold[0] || channelBitDepth > channelBitDepthThreshold[1] {
@@ -193,16 +205,14 @@ func checkSettings() error {
 	return nil
 }
 
-func generateHistogram(targetDir string) error {
-	if err := os.MkdirAll(histoFolder, 0o755); err != nil {
-		return fmt.Errorf("error creating histogram folder: %v\n", err)
-	}
+func generateHistogram(targetDir string) ([]ImageHist, error) {
+
 	entries, err := os.ReadDir(targetDir)
 	if err != nil {
-		return fmt.Errorf("can't read target folder: %v\n", err)
+		return nil, fmt.Errorf("can't read target folder: %v\n", err)
 	}
 
-	entryCount := 0
+	albumHisto := []ImageHist{}
 	start := time.Now()
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -220,17 +230,13 @@ func generateHistogram(targetDir string) error {
 			fmt.Printf("error processing image %s: %v\n", name, err)
 			continue
 		}
-		HistSaveName := filepath.Join(histoFolder, fmt.Sprintf("%s_%d_%s", name, channelBitDepth, histoSaveSuffix))
-		errSaveHist := saveHistogram(imageHist, HistSaveName)
-		if errSaveHist != nil {
-			fmt.Printf("error saving histogram for image %s: %v\n", name, errSaveHist)
-		}
-		entryCount++
+		albumHisto = append(albumHisto, imageHist)
 	}
+
 	elapsed := time.Since(start)
-	fmt.Printf("Number of images in target folder: %d\n", entryCount)
+	fmt.Printf("Number of images in target folder: %d\n", len(albumHisto))
 	fmt.Printf("Elapsed time: %v\n", elapsed)
-	return nil
+	return albumHisto, nil
 }
 
 func main() {
@@ -244,9 +250,15 @@ func main() {
 	fmt.Printf("Current working directory: %s\n", currentDir)
 	fmt.Printf("Target folder: %s\n", targetDir)
 	fmt.Printf("Channel bits: %d\n", channelBitDepth)
-	histoErr := generateHistogram(targetDir)
+
+	albumHisto, histoErr := generateHistogram(targetDir)
 	if histoErr != nil {
 		fmt.Printf("error generating histogram: %v\n\n", histoErr)
+		os.Exit(1)
+	}
+	saveErr := saveHistogram(albumHisto)
+	if saveErr != nil {
+		fmt.Printf("error saving histogram: %v\n\n", saveErr)
 		os.Exit(1)
 	}
 }
