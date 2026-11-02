@@ -203,3 +203,111 @@ go doc image.Rectangle
 ```
 
 通常先看介面／變數型別，再檢查具體型別或方法的回傳型別即可，不需要從標準函式庫逐個型別盲查。
+
+## 命名：MixedCaps（不是全部 PascalCase）
+
+Go 慣例叫 MixedCaps，靠**第一個字母大小寫**表達可見性：
+
+| 對象 | 寫法 | 例子 |
+|---|---|---|
+| 型別、要給其他 package 用的函式／欄位 | 大寫開頭（PascalCase） | `ImageHist`、`Path` |
+| 同 package 內的函式、變數 | 小寫開頭的 camelCase | `generateHistogram`、`targetFolder` |
+| 常數 | 同樣規則，不必 `MAX_FOO` 全大寫底線 | `const epsilon = 1e-9` |
+
+不要用 Python／C 習慣的 `snake_case`。區域變數也不要大寫開頭——大寫在 Go 裡意味著「匯出」，放在函式裡會誤導讀者。改名用編輯器的 **Rename Symbol（F2）**，比全域搜尋取代安全。
+
+## Struct：只有資料，方法寫在外面
+
+```go
+type ImageHist struct {
+	Path      string
+	Width     int
+	Height    int
+	Histogram map[uint32]float64
+}
+
+detail := ImageHist{
+	Path:      path,
+	Width:     img.Bounds().Dx(),
+	Height:    img.Bounds().Dy(),
+	Histogram: histogram,
+}
+```
+
+與 C 的差異：要有 `type ... struct`；欄位是「名字在前、型別在後」；結尾無分號；使用時不必再寫 `struct`。建議用欄位名初始化，不要靠位置對應。
+
+零值：`ImageHist{}` 合法；字串是 `""`，數字是 0，**map 欄位是 `nil`**——nil map 可以讀（得到零值），**不能寫入**。本專案的 histogram 是在函式裡 `make` 好再塞進 struct，所以沒踩到；若先宣告空 struct 再往 `Histogram[k]++` 會 panic。
+
+傳遞：複製 struct 只複製 header（含 map 的參照），不會深拷貝整張 histogram。長期存活的成果不要握 `image.Image`（解碼圖很大），路徑＋特徵＋尺寸即可。
+
+## Map 的兩個「俚語」：零值與 comma-ok
+
+### 讀不到的 key → 該型別的零值
+
+```go
+countB := imageHistB.Histogram[key] // key 不存在時 float64 得到 0.0
+```
+
+這是語言契約，不是巧合。算兩張 histogram 的 L1 時，正好可以把「缺格」當成 0。反過來說：用 map 存設定時，key 打錯字會靜默變成 0，極難除錯——固定項目用常數／獨立變數。
+
+### comma-ok：分辨「真的是零」和「根本沒這個 key」
+
+```go
+v, ok := m[key]
+if !ok {
+	// key 不存在
+}
+```
+
+第二個回傳值是 bool。同一家族還出現在：
+
+- type assertion：`x, ok := i.(T)`
+- channel 接收（關閉與否）：`v, ok := <-ch`
+
+算 L1 時：遍歷 A 用零值補 B 缺的格；遍歷 B 時用 comma-ok 只加「A 沒有的格」，避免共有格算兩次。
+
+## `defer`：綁函式，不綁迴圈
+
+`defer` 在**函式返回**時執行（多個 defer 為 LIFO）。放在 `for` 迴圈裡等於「這一圈登記、等整個函式結束才跑」——批次開檔時會同時掛住大量檔案。
+
+正確切法：一檔一個小函式，`defer file.Close()` 放在裡面；外層迴圈只呼叫該函式。本專案 `validateFile`、`saveHistogramFile` 都是這個模式。若在迴圈裡手動 `Close()` 而不用 defer，每個提早 `return err` 的路徑都要記得關，容易漏。
+
+## 路徑字串常用三件套
+
+```go
+base := filepath.Base(fullPath)                    // 最後一段（含副檔名）
+name := strings.TrimSuffix(base, filepath.Ext(base)) // 去掉最後一個副檔名
+dir := filepath.Dir(fullPath)                      // 所在目錄
+```
+
+`filepath` 會依作業系統處理分隔符；字面路徑在 Windows 可用 raw string `` `C:\...` ``。識別檔案請優先存**完整或相對路徑**，不要只存檔名（子資料夾可能撞名）。
+
+## 依 map 的 value 排序（Go 1.21+）
+
+`map` 本身無序。要「按分數由小到大列出 key」：
+
+```go
+import (
+	"cmp"
+	"maps"
+	"slices"
+)
+
+keys := slices.SortedFunc(maps.Keys(m), func(a, b string) int {
+	return cmp.Or(
+		cmp.Compare(m[a], m[b]), // 先比 value
+		cmp.Compare(a, b),       // value 相同再比 key，排序穩定可重現
+	)
+})
+```
+
+- `maps.Keys(m)`：回傳 key 的 iterator（不是 `[]string` 實體 slice）。
+- `slices.SortedFunc`：用比較函式排序；比較函式回傳負／零／正，類似 C 的 `strcmp`。
+- `cmp.Compare`：對有序型別回傳 -1／0／1。
+- `cmp.Or`：回傳第一個「非 0」的結果，用來做多鍵排序。
+
+對應 Python 的直覺大致是 `sorted(m.keys(), key=lambda k: (m[k], k))`，但 Go 把「取出 keys／比較／排序」拆成標準庫幾個小函式組合。
+
+## 錯誤處理的分層
+
+做事的函式（`generateHistogram`、`saveHistogramFile`）只 `return error`；站在程式邊界的 `main` 決定要不要 `os.Exit`。不要在中層 `log.Fatalf`——呼叫端會以為自己能處理錯誤，其實行程已經死了。錯誤訊息慣例小寫開頭（會被上層再包一層印出）。

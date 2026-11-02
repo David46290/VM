@@ -33,16 +33,16 @@
 
 **目前決定：先採用 3D 聯合 histogram。** 理由是聯合 key 保留的資訊最多：之後想改看各通道分開的 marginal histogram，可以從聯合 key 用位移／遮罩把 R、G、B 分量個別抽出來加總；反過來先存分開的 histogram，就合併不回聯合分佈。
 
-**實作現況（2026-10-21）**：
+**實作現況（更新至 2026-11）**：
 
-- 每個通道保留高 `channel_bit` 個 bit（從 `RGBA()` 的 16-bit 值直接右移 `16 - channel_bit`），再依 R、G、B 順序打包成一個 key：R 在最高位段、G 在中間、B 在最低位段，key 總寬度為 `3 * channel_bit` bits。
-- 計算過程先累積 `map[uint32]int`（key → 像素 count），再正規化成 `map[uint32]float64` 對外回傳（見下）。存檔時先把 key 排序再逐行寫出，所以同一張圖重跑、或原圖與複製檔，產出的文字檔可以直接逐行比對。
-- 不同 bit 設定輸出到不同目錄、檔名也帶 bit 數（目前程式的格式為 `output/debug/histogram_4_bits_each_rgb_norm/..._4_bits_each_rgb_norm.txt`；先前 bit 實驗的目錄是 `histogram_<b>_bits_each`），避免不同參數的特徵混在一起互相污染。
-- `channel_bit` 合法範圍目前設 1–10（上限 10 是因為 `3 * 10 = 30` bits 還塞得進 `uint32`，再大 key 打包會溢位），啟動時由 `check_settings()` 先檢查。
-- 後續加入 `hist_key_decode`：用打包時相同的位移量右移、再用遮罩 `(1 << channel_bit) - 1` 取出各通道的量化階級，是打包的逆運算（可用 round-trip 重組回原 key 自我驗證）。通道在 key 中的位置改用三個獨立變數（R=2、G=1、B=0）表達，不再用字串 map 查表（效能原因見下方效能備忘）。
-- 存檔時用 `bright_percentage` 把通道階級除以最大階級（\(2^{channel\_bit}-1\)）換成 0–1 的比例方便肉眼判讀，輸出格式為 `RGB: (r, g, b), contribution: v`（v 目前印到小數 5 位），目錄後綴為 `_bits_each_rgb_norm`。注意 `bright_percentage` 是「顏色座標」的縮放，**不是** histogram 正規化，兩種 normalize 不要混為一談。
-- **正規化設計（里程碑，2026-10-21）**：`img_histogram` 內部仍逐像素累積 int count、並以 `hist_count_inspect` 驗證總和等於寬 × 高，但對外一律回傳正規化後的 `map[uint32]float64`，把它定為全專案唯一標準表示。理由：下游每個函式只需認一種型態，不必為 `map[uint32]int` 與 `map[uint32]float64` 各寫一份複製邏輯，也避免呼叫端忘了轉換而混用 count 與比例。代價是原始 count 與總像素數在離開 `img_histogram` 後不可逆地遺失，之後若需要圖片尺寸，應在特徵 struct 另外記錄。
-- 正規化作法：`hist_normalize` 以「count 的實際總和」為分母逐格相除，不使用寬 × 高；如此即使之後改為取樣或只算局部區域，總和仍由資料本身保證為 1。轉換後再由 `hist_normalize_check` 以常數 `epsilon = 1e-9` 驗證所有比例總和 ≈ 1.0（浮點比較不用 `==`）。
+- 參數名現為 `channelBitDepth`（舊筆記／實驗表仍寫 `channel_bit`，意思相同）。每個通道保留高 `channelBitDepth` 個 bit（從 `RGBA()` 的 16-bit 直接右移 `16 - channelBitDepth`），再依 R、G、B 打包成 key；總寬度 `3 * channelBitDepth` bits。
+- 計算：`getHist` 累積 `map[uint32]int` → `histNormalize` → 回傳 `map[uint32]float64`。對外成果型別是 `ImageHist{Path, Width, Height, Histogram}`；**不**存放 `image.Image`（解碼圖用完即丟，否則幾千張會爆記憶體）。
+- `generateHistogram(dir) ([]ImageHist, error)` 只負責掃描與萃取；`saveHistogram`／`saveHistogramFile` 負責可選的 debug 文字檔。生成與存檔分離，Phase 2 可不寫檔直接算距離。
+- 不同 bit 設定輸出到不同目錄（例如 `output/debug/histogram/4_bits_each_rgb_norm/`），避免參數污染。
+- `channelBitDepth` 合法範圍 1–10（`3*10=30` 仍塞進 `uint32`），由 `checkSettings()` 檢查。
+- `histKeyDecode`：位移＋遮罩 `(1<<channelBitDepth)-1` 是打包的逆運算。通道位置用 `channelBitPlaceR/G/B` 常數，不用字串 map。
+- 存檔用 `brightPercentage` 把階級映到 0–1 方便閱讀；**不是** histogram 正規化。
+- **正規化**：分母是 count 實際總和；`histNormalizeCheck` 用 `epsilon` 驗證總和 ≈ 1.0。寬高在組 `ImageHist` 時以 `Bounds().Dx()/Dy()` 搶救進 struct。
 
 **實驗紀錄（2026-10-21）**：樣本圖 `20230826_233548.jpg`，固定同一張圖、只改 `channel_bit`，統計產出檔案的行數（即實際出現過的 distinct key 數）：
 
@@ -61,7 +61,7 @@
 - bit 太多時同一個顏色家族被切碎：5–6 bit 時，鄰近色被拆到大量相鄰格子，兩張視覺上很像的照片可能因 JPEG 雜訊／光線小偏移而落在不同格 → 距離被高估，「把像的誤判成不像」。
 - 分群品質就是在上面兩種錯誤之間取捨，沒有標準答案，要靠 Phase 2 的距離報告實測決定。
 
-**目前定案狀態**：`channel_bit = 4` 為暫定候選，程式目前也設為 4（879 格對這張圖算是「有解析度又不稀疏」的位置）。實驗與除錯過程中曾暫用 2 做 key decode 對照與熱迴圈效能測試，但它不是目前的執行設定。4 仍只是暫定，正式定案要等 Phase 2 距離報告出來、人工判讀過後再拍板。
+**目前定案狀態**：`channelBitDepth = 4` 仍是暫定候選（解析度與稀疏度折衷）。Phase 2 人工判讀是在 **`channelBitDepth = 2`** 下完成的（見 2_1）；正式定案前應用 4 bit 重跑最近／最遠配對，確認「背景主導」是否隨格子變細而減弱。除錯時可暫時改小 bit，commit 前要對齊註解與預設值。
 
 **公式推導：為什麼理論格子數是 \(8^b\)**
 
@@ -106,21 +106,56 @@
 
 ## 已知陷阱（Phase 2 判讀時對照）
 
-1. **背景主導特徵**：模型照片的背景（桌面、白牆、布）可能佔 60% 以上像素。兩隻不同模型在同一張桌上拍，histogram 可能比同一隻模型換背景拍還像。若 Phase 2 發現最近的配對都是「同背景」，就是這個兇手。之後的可能對策（先知道就好，別先做）：中心裁切、忽略接近背景色的 bin、換 HSV 只看色調等。
-2. **空間資訊遺失**：histogram 只看顏色比例、不看位置。「紅白配色 A 模型」和「白紅配色 B 模型」比例一樣就會被併群；同一個模型換角度、換光線可能被拆群。這是方法的先天上限，探索階段就是要量出這個上限在哪。
-3. **光線與白平衡**：同一隻模型在不同燈光下，整體顏色會偏移。Histogram 對這件事沒有抵抗力，先觀察影響多大再說。
+1. **背景主導特徵**（**已在 Phase 2、`channelBitDepth=2` 實測確認**，見 2_1）：最近配對大量是同 lighting／stage；不同模型同舞台可擠進前 10。可能對策（尚未實作）：中心裁切、忽略接近背景色的 bin、換 HSV 只看色調等。先用 4 bit 重跑對照再選。
+2. **空間資訊遺失**：histogram 只看顏色比例、不看位置。「紅白配色 A」和「白紅配色 B」比例一樣會被併群；同模型換角度／光線可能被拆群。
+3. **光線與白平衡**：同一隻模型在不同燈光下顏色會偏移；最遠配對也常伴隨 lighting／stage 全面不同。
 
 ## 距離函式（Phase 2）
 
-- 第一版用最簡單的：兩條 histogram 逐 bin 相減取絕對值再加總（L1 距離）。正規化後，兩張完全相同的圖距離為 0，完全不重疊時距離最大為 2，心裡先有這個尺度感。
-- 產出不是分群結果，而是**報告**：最近 10 對、最遠 10 對的檔名，人工對照照片判讀。
-- 其他距離（histogram intersection、chi-square、Bhattacharyya 等）是之後調參的選項，現在不用先學。
+### L1 定義與實作要點
 
-Phase 2 要回答的問題（結論記得寫回這裡）：
+\[
+D(p,q) = \sum_i |p_i - q_i|
+\]
 
-- [ ] 最近的配對像在哪裡？（色調／背景／同一個模型？）
-- [ ] 最遠的配對差在哪裡？
-- [ ] 有沒有「不該像卻很近」的配對？兇手推測是？
+正規化後 \(D \in [0, 2]\)：0 = 相同；2 = 顏色格完全不重疊（自然照片幾乎碰不到）。等價關係：histogram intersection \(= 1 - D/2\)。
+
+實作（`correlateHistL1`）：
+
+- 缺 key 當 0（map 零值）；先掃 A 的 key，再補 B 獨有的 key → 聯集、不重複計算。
+- 用 `checkedName` 標記已當過 A 的路徑，避免 A_vs_B 與 B_vs_A 雙算，並跳過自比。
+- 結果用 `slices.SortedFunc(maps.Keys(...), cmp.Or(依分數, 依 key))` 排序；印最近／最遠各 `l1ScoreShowAmount` 對。
+- **key 只當標籤對齊，不當空間距離**：相鄰 key 數字差 ≠ 顏色相近（里程表規律）；跨 bin 的「搬運距離」是之後 EMD 類方法的事，L1 不做。
+
+尺度感（實測）：小相簿上最高約 1.55–1.60；紅圖 `20230904_002238` vs 藍圖 `20230901_154340` 約 **1.6**（差別大，符合預期）。判讀看**相對排序**，不必期待碰到 2。
+
+其他距離（intersection、chi-square、Bhattacharyya、EMD）是之後選項；先把 L1 報告判讀完再決定要不要換。
+
+### 2_1. L1 人工判讀（2026-11-02，`channelBitDepth = 2`）
+
+原始註解紀錄：`output/debug/l1_coorelate/bitDepth2_l1_coorelation_inspect.txt`（約 1770 對，已排序）。
+
+**最近端（節錄）**：
+
+| 大約 L1 | 例子 | 肉眼 |
+|---|---|---|
+| 0 | 原圖 vs `_copy` | 完全相同 |
+| ~0.15–0.18 | 同模型連拍 | same model / pose / lighting / stage |
+| ~0.22–0.30 | 多對 | **different models**，但仍 same lighting / stage |
+
+**最遠端（節錄）**：L1 ≈ 1.55–1.60，註解多為 `different: model, pose, angle, lighting, stage`。
+
+Phase 2 三題答案：
+
+- [x] **最近的配對像在哪？** 主要是 **same lighting + same stage（場景／背景／燈光）**；是否同一隻模型是次要條件。同場連拍會排很前。
+- [x] **最遠的配對差在哪？** 模型、姿勢、角度、燈光、舞台多半全面不同；顏色直方圖幾乎不重疊（紅 vs 藍約 1.6 屬此量級）。
+- [x] **不該像卻很近？兇手？** **有。** 前 10 內出現多組不同模型、同舞台／燈光（例如 `20230910_113350` vs `113500`／`113602`，L1 ≈ 0.22–0.24）。兇手是**背景／場景主導**；在 2 bit 粗量化下大面積背景更容易把不同模型鎖進相近的少數 bin。
+
+**對後續的含義**：
+
+- 若目標是「同場連拍歸一群」→ 目前特徵有用。
+- 若目標是「同一隻模型歸一群」→ 全圖 RGB histogram + L1 **不夠**，必須處理背景或換特徵。
+- 下一步建議：用 **`channelBitDepth = 4` 重跑** 最近／最遠 10 對；若「不同模型同舞台」仍占前段 → 背景本身是主因；若明顯減少 → 粗量化是幫兇。再決定中心裁切／忽略暗部大 bin／HSV 等，**先不要上 EMD**。
 
 ## 特徵快取（Phase 3）
 

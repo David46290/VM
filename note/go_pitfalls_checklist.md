@@ -19,9 +19,12 @@
 
 ## 檔案與流程相關
 
-- [ ] `defer file.Close()` 的範圍是**所在的函式**：放在處理單張圖的函式裡，每張圖處理完就關；放在 `main` 的迴圈裡，會拖到程式結束才關。
+- [ ] `defer file.Close()` 的範圍是**所在的函式**：放在處理單張的子函式裡；放在迴圈所在的外層函式裡，會等函式結束才關 → 幾千張時檔案描述符爆掉。批次存檔應 `saveXxxFile` 一檔一函式 + `defer`（`saveHistogramFile` 已如此）。
 - [ ] `os.ReadDir` 只掃一層、且回傳的 `DirEntry` 不含父路徑，要用 `filepath.Join(dir, entry.Name())` 拼完整路徑。要遞迴子資料夾改用 `filepath.WalkDir`（Phase 5）。
-- [ ] 資料夾讀不到 → 可以 `log.Fatalf` 直接停；單張圖解碼失敗 → 印出檔名後 `continue` 跳過，不要讓一張壞圖殺掉整批。
+- [ ] 從完整路徑取無副檔名檔名：`base := filepath.Base(path)`，再 `strings.TrimSuffix(base, filepath.Ext(base))`。
+- [ ] `filepath.Dir(完整檔案路徑)` 在「檔案就放在 `histoFolder` 底下」時，結果等於 `histoFolder`；外層已 `MkdirAll(histoFolder)` 就不必在內層再對 `Dir(檔名)` 建一次。
+- [ ] 資料夾讀不到 → `main` 決定是否退出；單張失敗 → 印檔名後 `continue`。做事的函式回傳 `error`，不要自己 `log.Fatalf`。
+- [ ] 長期存活的成果 struct（如 `ImageHist`）**不要**握 `image.Image`；解碼圖是工作材料，用完即丟。
 
 ## 錯誤處理相關
 
@@ -43,7 +46,15 @@
 - [ ] 型別問題先印 `%T`；API 問題先查 `go doc image.Image`、`go doc image.YCbCr`，不要盲翻標準庫原始碼。
 - [ ] 組態問題先分清楚：`go run main.go` 是跑單檔，VS Code F5 是建置整個 package，後者需要 `go.mod`。
 
+## Map／排序俚語（速記）
+
+- [ ] `v, ok := m[k]`（comma-ok）：第二個值表示 key 是否存在；type assertion、channel 接收也有類似兩值形式。
+- [ ] 只寫 `v := m[k]`：缺 key 得到零值，**分不出「真的是 0」和「不存在」**——算 L1 聯集時正好能用；存設定時則是地雷。
+- [ ] 依 map 的 value 排序：`slices.SortedFunc(maps.Keys(m), func(a, b K) int { return cmp.Or(cmp.Compare(m[a], m[b]), cmp.Compare(a, b)) })`（Go 1.21+ 的 `cmp`／`maps`／`slices`）。
+
 ## 命名與格式（風格提醒）
 
-- [ ] Go 慣例是 camelCase（例如 `validateFile`），不是 snake_case；目前程式裡的舊命名找時間順手改，不用專門停下來處理。
-- [ ] 存檔後跑 `gofmt` 的效果靠編輯器格式化即可；Tab 縮排問題先確認沒有誤觸 `Ctrl+M`（Toggle Tab Key Moves Focus）。
+- [ ] Go 用 **MixedCaps**：型別／匯出欄位 PascalCase（`ImageHist`）；套件內函式／變數小寫開頭 camelCase（`generateHistogram`）。**不要** snake_case，也**不要**把區域變數寫成大寫開頭（那表示匯出）。
+- [ ] 縮寫維持全大寫風格：`ID`、`URL`；本專案用 `channelBitDepth`、`ImageHist` 這類完整或一致縮寫即可。
+- [ ] 存檔後靠編輯器 `gofmt`；Tab 問題先確認沒誤觸 `Ctrl+M`（Toggle Tab Key Moves Focus）。
+- [ ] 重構 commit 不要夾帶行為變更（例如順便改 `channelBitDepth`）；改名前後同設定產出應可逐字比對。

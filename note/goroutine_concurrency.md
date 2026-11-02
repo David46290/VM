@@ -47,5 +47,5 @@ main ──送路徑──▶ jobs channel ──▶ worker 1 ─┐
 - [ ] goroutine 數量失控（見上，禁止事項）
 - [ ] channel 沒人 close → 收集者永遠等 → deadlock
 - [ ] 多個 goroutine 同時寫同一個 slice／map → data race；結果一律走 channel 回主程式再彙整。驗證工具：`go run -race`
-- [ ] 在 `main` 的迴圈裡 `defer file.Close()`：defer 的是 main，要等程式結束才關檔。開關檔要包在每張圖的處理函式裡（目前 `validate_file` 的切法就是對的）
+- [ ] 在外層迴圈裡 `defer file.Close()`：defer 綁的是函式不是迴圈圈次。開關檔要包在單張處理函式裡（`validateFile`、`saveHistogramFile` 的切法是對的）
 - [ ] 用全域變數累積結果又不加同步——先用 channel 模式，`sync.Mutex` 是之後才需要認識的東西
