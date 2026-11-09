@@ -4,3 +4,4 @@ VM.exe
 output/
 __debug_bin.exe
 .vscode/
+.cursor/rules/go-learning-advisor.mdc
