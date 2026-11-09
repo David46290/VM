@@ -4,6 +4,9 @@ import (
 	"cmp"
 	"fmt"
 	"image"
+	"image/color"
+	"image/draw"
+	"image/jpeg"
 	_ "image/jpeg"
 	_ "image/png"
 	"maps"
@@ -13,6 +16,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/disintegration/imaging"
 )
 
 const epsilon = 1e-9
@@ -20,19 +25,24 @@ const epsilon = 1e-9
 var (
 	targetFolder             = "images"
 	supportedImgType         = [2]string{"jpeg", "png"}
-	channelBitDepth          = 4             // bit depth for each channel (default 4 for histogram generation. Lower values for quick debugging)
+	channelBitDepth          = 2             // bit depth for each channel (default 4 for histogram generation. Lower values for quick debugging)
 	channelBitDepthThreshold = [2]int{1, 10} //max 10 to prevent overflow of uint32 in histogram key
 	imageDefaultBitDepth     = 16
 	// bit position for each channel in the histogram key, 2: leftmost, 0: rightmost
-	channelBitPlaceR  = 2
-	channelBitPlaceG  = 1
-	channelBitPlaceB  = 0
-	folderSuffix      = "bits_each_rgb_norm"
-	histoFolder       = filepath.Join("output/debug/histogram", fmt.Sprintf("%d_%s", channelBitDepth, folderSuffix))
-	histoSaveSuffix   = "bits_each_rgb_norm.txt"
-	l1Folder          = "output/debug/l1_coorelate"
-	l1SaveSuffix      = "l1_coorelation.txt"
-	l1ScoreShowAmount = 10
+	channelBitPlaceR    = 2
+	channelBitPlaceG    = 1
+	channelBitPlaceB    = 0
+	folderSuffix        = "bits_each_rgb_norm"
+	histoFolder         = filepath.Join("output/debug/histogram", fmt.Sprintf("%d_%s", channelBitDepth, folderSuffix))
+	histoSaveSuffix     = "bits_each_rgb_norm.txt"
+	l1Folder            = "output/debug/l1_coorelate"
+	l1SaveSuffix        = "l1_coorelation.txt"
+	l1ScoreShowAmount   = 10
+	heatMapFolder       = "output/debug/heatmap"
+	heatMapSaveSuffix   = "heatmap.jpg"
+	roiFolder           = "output/debug/roi"
+	roiSaveSuffix       = "roi.jpg"
+	roiContourThickness = 2
 )
 
 type ImageHist struct {
@@ -55,9 +65,17 @@ func validateFile(path string) (image.Image, string, error) {
 		return nil, "", err
 	}
 	defer file.Close()
-	img, format, err := image.Decode(file)
+
+	// EXIF Orientation Correction (for smartphone photos)
+	img, err := imaging.Decode(file, imaging.AutoOrientation(true))
 	if err != nil {
 		return nil, "", err
+	}
+
+	ext := strings.ToLower(filepath.Ext(path))
+	format := strings.TrimPrefix(ext, ".")
+	if format == "jpg" {
+		format = "jpeg"
 	}
 	return img, format, nil
 }
@@ -185,7 +203,126 @@ func brightPercentage(value uint32) float64 {
 	return float64(value) / float64(maximum)
 }
 
-func generateHistogram(targetDir string) ([]ImageHist, error) {
+func heatMapGeneration(img image.Image) (image.Image, error) {
+	kernel_size := 3
+	kernel_x := [3][3]int{
+		{-1, 0, 1},
+		{-2, 0, 2},
+		{-1, 0, 1},
+	}
+	kernel_y := [3][3]int{
+		{-1, -2, -1},
+		{0, 0, 0},
+		{1, 2, 1},
+	}
+	bounds := img.Bounds()
+	// Zero-padding
+	// center-moving window
+	if kernel_size%2 == 0 {
+		return nil, fmt.Errorf("kernel_size must be odd")
+	}
+	kernelWingSize := kernel_size / 2
+	convResult := image.NewGray(bounds)
+	for i := bounds.Min.X; i < bounds.Max.X; i++ {
+		for j := bounds.Min.Y; j < bounds.Max.Y; j++ {
+			// Total counting index: (i-kernelWingSize : i+ kernelWingSize, j-kernelWingSize : j+ kernelWingSize)
+			sumX := 0
+			sumY := 0
+			sumTotal := 0
+			for kx := 0; kx < kernel_size; kx++ {
+				for ky := 0; ky < kernel_size; ky++ {
+					x := i + kx - kernelWingSize
+					y := j + ky - kernelWingSize
+					if x < bounds.Min.X || x >= bounds.Max.X || y < bounds.Min.Y || y >= bounds.Max.Y {
+						continue
+					}
+					r, g, b, _ := img.At(x, y).RGBA()
+					sumX += kernel_x[kx][ky] * int(r)
+					sumX += kernel_x[kx][ky] * int(g)
+					sumX += kernel_x[kx][ky] * int(b)
+					sumX /= 3
+					sumY += kernel_y[kx][ky] * int(r)
+					sumY += kernel_y[kx][ky] * int(g)
+					sumY += kernel_y[kx][ky] * int(b)
+					sumY /= 3
+					sumTotal += int(math.Sqrt(float64(sumX*sumX + sumY*sumY)))
+				}
+				convResult.SetGray(i, j, color.Gray{Y: uint8(sumTotal / 9)})
+			}
+		}
+	}
+	return convResult, nil
+}
+
+func roiDetect(imgHeatMap image.Image) ([]int, error) {
+	//return 4 integers: minX, minY, maxX, maxY
+	bounds := imgHeatMap.Bounds()
+	multiplier := 0.6
+	minX := int(float64(bounds.Min.X) * (1 + multiplier))
+	minY := int(float64(bounds.Min.Y) * (1 + multiplier))
+	maxX := int(float64(bounds.Max.X) * multiplier)
+	maxY := int(float64(bounds.Max.Y) * multiplier)
+	return []int{minX, minY, maxX, maxY}, nil
+}
+
+func drawRoi(img image.Image, roi []int) (image.Image, error) {
+	//copy a drawable image instance from img
+	target := image.NewRGBA(img.Bounds())
+	fmt.Printf("Image size: %d x %d\n", img.Bounds().Dx(), img.Bounds().Dy())
+	draw.Draw(target, target.Bounds(), img, img.Bounds().Min, draw.Src)
+	// draw ROI contour
+	x0 := roi[0]
+	x1 := roi[2]
+	y0 := roi[1]
+	y1 := roi[3]
+	whiteBackground := &image.Uniform{C: color.White}
+	draw.Draw(target, image.Rect(x0, y0, x1, y0+roiContourThickness), whiteBackground, image.Point{}, draw.Src) //upside
+	draw.Draw(target, image.Rect(x0, y0, x0+roiContourThickness, y1), whiteBackground, image.Point{}, draw.Src) //leftside
+	draw.Draw(target, image.Rect(x1-roiContourThickness, y0, x1, y1), whiteBackground, image.Point{}, draw.Src) //rightside
+	draw.Draw(target, image.Rect(x0, y1-roiContourThickness, x1, y1), whiteBackground, image.Point{}, draw.Src) //downside
+	return target, nil
+}
+
+func saveRoiMarking(img image.Image, folderDir string, name string, imgType string) error {
+	saveName := filepath.Join(folderDir, fmt.Sprintf("%s_%s_%s", name, imgType, roiSaveSuffix))
+	file, err := os.Create(saveName)
+	if err != nil {
+		return fmt.Errorf("error creating roi file: %v\n", err)
+	}
+	defer file.Close()
+	err = jpeg.Encode(file, img, nil)
+	if err != nil {
+		return fmt.Errorf("error encoding roi marked image: %v\n", err)
+	}
+	return nil
+}
+
+func drawAndSaveRoi(imgOriginal image.Image, imgHeatMap image.Image, roi []int, name string) error {
+	// draw ROI contour on both original image & heat map
+	imgRoiFolder := filepath.Join(roiFolder, name)
+	if err := os.MkdirAll(imgRoiFolder, 0o755); err != nil {
+		return err
+	}
+	markedOriginal, err := drawRoi(imgOriginal, roi)
+	if err != nil {
+		return fmt.Errorf("error drawing roi: %v\n", err)
+	}
+	err = saveRoiMarking(markedOriginal, imgRoiFolder, name, "og")
+	if err != nil {
+		return fmt.Errorf("error saving roi marked image: %v\n", err)
+	}
+	markedHeatMap, err := drawRoi(imgHeatMap, roi)
+	if err != nil {
+		return fmt.Errorf("error drawing roi: %v\n", err)
+	}
+	err = saveRoiMarking(markedHeatMap, imgRoiFolder, name, "heatmap")
+	if err != nil {
+		return fmt.Errorf("error saving roi marked image: %v\n", err)
+	}
+	return nil
+}
+
+func imageProcess(targetDir string) ([]ImageHist, error) {
 	entries, err := os.ReadDir(targetDir)
 	if err != nil {
 		return nil, fmt.Errorf("can't read target folder: %v\n", err)
@@ -197,14 +334,40 @@ func generateHistogram(targetDir string) ([]ImageHist, error) {
 		if entry.IsDir() {
 			continue
 		}
-		name := entry.Name()
-		path := filepath.Join(targetDir, name)
+		nameWithExT := entry.Name()
+		base := filepath.Base(nameWithExT)
+		name := strings.TrimSuffix(base, filepath.Ext(base))
+		path := filepath.Join(targetDir, nameWithExT)
 		img, format, err := validateFile(path)
 		if err != nil {
-			fmt.Printf("file %s is not a valid image.\n", name)
+			fmt.Printf("file %s is not a valid image.\n", nameWithExT)
 			continue
 		}
-		imageHist, err := histogramExtract(path, img, format)
+		imgHeatMap, err := heatMapGeneration(img)
+		if err != nil {
+			fmt.Printf("error generating heat map: %v\n", err)
+			continue
+		}
+		saveHeatMap(imgHeatMap, name)
+		roi, err := roiDetect(imgHeatMap)
+		if err != nil {
+			fmt.Printf("error detecting ROI: %v\n", err)
+			continue
+		}
+		sub, ok := img.(interface {
+			SubImage(r image.Rectangle) image.Image
+		})
+		if !ok {
+			fmt.Printf("image does not support SubImage: %v\n", err)
+			continue
+		}
+		err = drawAndSaveRoi(img, imgHeatMap, roi, name)
+		if err != nil {
+			fmt.Printf("error drawing and saving roi: %v\n", err)
+			continue
+		}
+		imgCropped := sub.SubImage(image.Rect(roi[0], roi[1], roi[2], roi[3]))
+		imageHist, err := histogramExtract(path, imgCropped, format)
 		if err != nil {
 			fmt.Printf("error processing image %s: %v\n", name, err)
 			continue
@@ -291,7 +454,7 @@ func correlateHistL1(albumHisto []ImageHist) (map[string]float64, error) {
 			nameA := strings.TrimSuffix(baseA, filepath.Ext(baseA))
 			baseB := filepath.Base(imageHistB.Path)
 			nameB := strings.TrimSuffix(baseB, filepath.Ext(baseB))
-			recordKey := fmt.Sprintf("%s_vs_%s", nameA, nameB)
+			recordKey := fmt.Sprintf("%s vs %s", nameA, nameB)
 			l1records[recordKey] = l1Distance
 		}
 	}
@@ -341,6 +504,24 @@ func saveL1Records(l1records map[string]float64) error {
 	return nil
 }
 
+func saveHeatMap(img image.Image, name string) error {
+	if err := os.MkdirAll(heatMapFolder, 0o755); err != nil {
+		return err
+	}
+	saveName := filepath.Join(heatMapFolder, fmt.Sprintf("%s_%s", name, heatMapSaveSuffix))
+	file, err := os.Create(saveName)
+	if err != nil {
+		return fmt.Errorf("error creating heat map file: %v\n", err)
+	}
+	defer file.Close()
+	err = jpeg.Encode(file, img, nil)
+	if err != nil {
+		return fmt.Errorf("error encoding heat map: %v\n", err)
+	}
+	fmt.Printf("Heat map saved to %s\n", saveName)
+	return nil
+}
+
 func main() {
 	if err := checkSettings(); err != nil {
 		fmt.Printf("Invalid settings: %v\n\n", err)
@@ -353,7 +534,7 @@ func main() {
 	fmt.Printf("Target folder: %s\n", targetDir)
 	fmt.Printf("Channel bits: %d\n", channelBitDepth)
 
-	albumHisto, histoErr := generateHistogram(targetDir)
+	albumHisto, histoErr := imageProcess(targetDir)
 	if histoErr != nil {
 		fmt.Printf("error generating histogram: %v\n\n", histoErr)
 		os.Exit(1)
