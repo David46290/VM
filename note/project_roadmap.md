@@ -20,7 +20,9 @@
 
 **Phase 2 判讀已收斂**（2 bit + 4 bit；inspect 已人工修訂）。結論：全圖 RGB histogram + L1 同時有**假近**（不同模型同舞台）與**假遠**（同模型換場／濾鏡）；調 bit 無法解決。
 
-**暫定對策方向**：依拍照習慣「單體擺在畫面中央附近」，先走**中心主體 → 邊緣定 ROI → ROI 內沿用 histogram + L1**（相簿內雖有多物體照，第一版先不處理）。細節見 `histogram_and_clustering.md`「中心主體 ROI」；**實作由自己寫**。選定／驗證後再進 Phase 3。
+**暫定對策方向**：中心主體 → 邊緣／梯度 heat map → 矩形 ROI → `SubImage` 後沿用 histogram + L1。細節見 `histogram_and_clustering.md`「中心主體 ROI」。
+
+**目前**：debug scaffold 已接上（`heatMapGeneration`、placeholder `roiDetect`、heat map／ROI 存圖、`imageProcess` 逐張管線）；**真 ROI 演算法與對照實驗尚未做**。實作自行進行。
 
 ## 階段表
 
@@ -51,9 +53,9 @@
 
 - [x] 複製圖 histogram 一致；count 總和與正規化總和檢查；紅藍簽名 bin 符合預期
 
-### Phase 2 — 距離與探索報告（判讀完成；對策暫緩）
+### Phase 2 — 距離與探索報告（判讀完成；ROI 對策進行中）
 
-目標：當探測器，回答「最近像在哪／最遠遠在哪／有沒有不該近／不該遠」（結論見 `histogram_and_clustering.md` 2_1、2_2）。
+目標：當探測器，回答「最近像在哪／最遠遠在哪／有沒有不該近／不該遠」（結論見 `histogram_and_clustering.md` 2_1、2_2）；對策見「中心主體 ROI」。
 
 待辦：
 
@@ -61,7 +63,8 @@
 - [x] 依分數排序輸出；印最近／最遠各 N 對（`l1ScoreShowAmount`）
 - [x] 人工對照（`channelBitDepth = 2`）：`bitDepth2_l1_coorelation_inspect.txt`
 - [x] `channelBitDepth = 4` 重跑＋人工修訂：`bitDepth4_l1_coorelation_inspect.txt`（假近仍在；最遠端出現同模型假遠 `214108` vs `214023`）
-- [ ] 實作並驗證**中心主體 ROI**（邊緣定矩形 ROI → ROI 內 histogram + L1；見筆記）後進 Phase 3 — `channelBitDepth=4` 可當預設候選
+- [x] ROI／heat map **debug scaffold**：`imageProcess` 逐張管線；`saveHeatMap`；placeholder `roiDetect`；`drawAndSaveRoi`（原圖＋heat map 白框）；`SubImage` 後再 `histogramExtract`
+- [ ] 真**中心主體 ROI**（`roiDetect` 依 heat map 定框）→ 重跑 L1／人工對照假近假遠 → 再進 Phase 3（`channelBitDepth=4` 可當預設候選）
 
 ### Phase 3 — 特徵快取與分群調參
 

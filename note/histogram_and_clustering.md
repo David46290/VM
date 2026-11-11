@@ -117,21 +117,56 @@
 - 其他候選：忽略近黑／大面積背景 bin、換 HSV 只看色調等。
 - **先不要上 EMD**。實作自行進行。
 
-### 中心主體 ROI（對策細節，2026-11-02）
+### 中心主體 ROI（對策細節，2026-11-02；debug scaffold 2026-11）
 
 **先驗**：拍照習慣是單體擺在畫面中央附近；通常背景複雜度低於模型本身。相簿內有多物體照，第一版先不處理。
 
-**流程**：
+**目標流程**：
 
 1. 在「中央附近」做邊緣／梯度檢測（水平／垂直輪廓、梯度變化大的像素），用高變化區定義主體範圍。
-2. 第一版 ROI 形狀用**軸對齊矩形**；每張圖存矩形**四個頂點**（建議掛在 `ImageHist`，例如 `ROI` 欄位）。
-3. 得到 ROI 後，**只在框內**沿用既有 3D histogram + L1（`channelBitDepth=4` 可當預設）。
+2. 第一版 ROI 形狀用**軸對齊矩形**；以四端點（或等價的 min/max）表示。
+3. 得到 ROI 後，用 `SubImage` 得到 bounds 已是 ROI 的視圖，再沿用既有 3D histogram + L1（正式對照仍以 `channelBitDepth=4` 為候選；debug 時可暫時改小 bit）。
 
 **實作備註（Go）**：
 
-- `image.Rectangle` 的 `Max` 是**半開**（不含 Max）；若四頂點用「含端點像素」語意，轉成掃描用 `Rect` 時 `Max` 要 +1，反之亦然。
-- 軸對齊矩形用兩點（左上／右下）就夠表達；四頂點是為了語意清楚、之後若換形狀也好擴。
-- 邊緣算法與「中央附近」範圍／門檻尚未定死，實作時再調；先求 ROI 可存、histogram 可改掃 ROI。
+- `image.Rectangle` 的 `Max` 是**半開**（不含 Max）；端點語意與 `Rect`／`SubImage` 轉換時要對齊。
+- 不要手改原圖 `Rect`；用具體型別的 `SubImage`（先 type assert 到「有 `SubImage` 方法」的介面）。
+- 唯一握 `image.Image` 的地方應是相簿逐張迴圈：解碼 → heat map／ROI／hist → 丟圖。已把掃目錄從 `generateHistogram` 收成 `imageProcess`。
+- `validateFile` 改走 `imaging.Decode(..., AutoOrientation(true))`，處理手機照片 EXIF 方向。
+
+#### 目前進度（placeholder + debug I/O，尚未定案真 ROI）
+
+管線（`imageProcess` 逐張）：
+
+```
+validateFile
+  → heatMapGeneration（目前：3×3 Sobel 風格 kernel → Gray）
+  → saveHeatMap
+  → roiDetect（目前：幾何 placeholder，非整張 heat map 門檻框選）
+  → drawAndSaveRoi（原圖 + heat map 上畫白框）
+  → SubImage(roi) → histogramExtract（框內 histogram）
+```
+
+| 函式 | 狀態 | 說明 |
+|---|---|---|
+| `heatMapGeneration` | 已接上、可存圖 | 全圖卷積成灰度「邊緣強度」圖；算法細節／正規化仍可再修，先當 debug 特徵圖 |
+| `roiDetect` | **placeholder** | 回傳 `[]int{minX,minY,maxX,maxY}`；現況用 bounds 比例（約 0.6）切中央區，**尚未**依 heat map 高響應像素定框 |
+| `drawRoi`／`drawAndSaveRoi`／`saveRoiMarking` | 可用 | 白框疊在原圖與 heat map，方便目視框有沒有歪 |
+| `saveHeatMap` | 可用 | JPEG 寫出 heat map |
+| `ImageHist.ROI` 欄位 | **尚未** | ROI 仍是迴圈內區域變數；之後若要快取／重跑 L1 再掛進 struct |
+
+**Debug 產物**（皆在 `output/`，已 `.gitignore`，不進 git）：
+
+| 路徑 | 內容 |
+|---|---|
+| `output/debug/heatmap/<name>_heatmap.jpg` | 特徵／邊緣 heat map |
+| `output/debug/roi/<name>/<name>_og_roi.jpg` | 原圖 + ROI 白框 |
+| `output/debug/roi/<name>/<name>_heatmap_roi.jpg` | heat map + ROI 白框 |
+| `output/debug/histogram/...`、`l1_coorelate/...` | 既有 histogram／L1 文字產物 |
+
+設計取捨（已採）：先打通**存圖 I/O + placeholder**，再換真正「依梯度定 ROI」；目視驗收靠「全圖 heat map + 框」，不只看裁切圖。
+
+**下一步（真算法，未做）**：讓 `roiDetect` 吃 heat map（中央附近高響應像素 → 矩形），再重跑 L1 最近／最遠對照假近／假遠是否改善。
 
 **驗證目標**：假近（不同模型同舞台）與假遠（同模型換場／濾鏡）是否比全圖 L1 改善；仍用最近／最遠 N 對人工對照。
 
@@ -218,7 +253,7 @@ Phase 2 補答（4 bit）：
 
 - `channelBitDepth = 4` 可當後續預設解析度候選；**單靠調 bit 無法達「同模型歸群」**。
 - 若目標是「同場連拍歸一群」→ 目前特徵仍有用。若目標是「同一隻模型歸一群」→ 必須處理背景／色調或換特徵（假近＋假遠都要顧）。
-- 具體做法見「中心主體 ROI」；多物體場景留到後續。ROI 驗證過後再進 Phase 3 快取與分群調參；**仍先不要上 EMD**。
+- 具體做法見「中心主體 ROI」；debug scaffold（heat map／ROI 存圖 + placeholder 框）已接上，**真 roiDetect 與假近／假遠重跑尚未做**。多物體場景留到後續。ROI 驗證過後再進 Phase 3；**仍先不要上 EMD**。
 
 ## 特徵快取（Phase 3）
 
