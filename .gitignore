@@ -1,5 +1,6 @@
 #test images
 images/
+imagesQuickDebug/
 VM.exe
 output/
 __debug_bin.exe

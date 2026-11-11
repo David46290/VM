@@ -23,11 +23,12 @@ import (
 const epsilon = 1e-9
 
 var (
-	targetFolder             = "images"
+	targetFolder             = "imagesQuickDebug"
 	supportedImgType         = [2]string{"jpeg", "png"}
-	channelBitDepth          = 2             // bit depth for each channel (default 4 for histogram generation. Lower values for quick debugging)
+	channelBitDepth          = 4             // bit depth for each channel (default 4 for histogram generation. Lower values for quick debugging)
 	channelBitDepthThreshold = [2]int{1, 10} //max 10 to prevent overflow of uint32 in histogram key
 	imageDefaultBitDepth     = 16
+	imageProcessBitDepth     = 8
 	// bit position for each channel in the histogram key, 2: leftmost, 0: rightmost
 	channelBitPlaceR    = 2
 	channelBitPlaceG    = 1
@@ -39,10 +40,12 @@ var (
 	l1SaveSuffix        = "l1_coorelation.txt"
 	l1ScoreShowAmount   = 10
 	heatMapFolder       = "output/debug/heatmap"
-	heatMapSaveSuffix   = "heatmap.jpg"
+	heatMapSaveSuffix   = "heatmap_from_smoothed.jpg"
 	roiFolder           = "output/debug/roi"
 	roiSaveSuffix       = "roi.jpg"
 	roiContourThickness = 2
+	smoothedFolder      = "output/debug/smoothed"
+	smoothedSaveSuffix  = "smoothed.jpg"
 )
 
 type ImageHist struct {
@@ -203,52 +206,86 @@ func brightPercentage(value uint32) float64 {
 	return float64(value) / float64(maximum)
 }
 
-func heatMapGeneration(img image.Image) (image.Image, error) {
-	kernel_size := 3
-	kernel_x := [3][3]int{
-		{-1, 0, 1},
-		{-2, 0, 2},
-		{-1, 0, 1},
-	}
-	kernel_y := [3][3]int{
-		{-1, -2, -1},
-		{0, 0, 0},
+func gaussianSmoothing(img image.Image) (image.Image, error) {
+	kernelSize := 3
+	kernel := [3][3]int{
+		{1, 2, 1},
+		{2, 4, 2},
 		{1, 2, 1},
 	}
+
 	bounds := img.Bounds()
 	// Zero-padding
 	// center-moving window
-	if kernel_size%2 == 0 {
+	if kernelSize%2 == 0 {
 		return nil, fmt.Errorf("kernel_size must be odd")
 	}
-	kernelWingSize := kernel_size / 2
+	kernelWingSize := kernelSize / 2
 	convResult := image.NewGray(bounds)
 	for i := bounds.Min.X; i < bounds.Max.X; i++ {
 		for j := bounds.Min.Y; j < bounds.Max.Y; j++ {
 			// Total counting index: (i-kernelWingSize : i+ kernelWingSize, j-kernelWingSize : j+ kernelWingSize)
-			sumX := 0
-			sumY := 0
-			sumTotal := 0
-			for kx := 0; kx < kernel_size; kx++ {
-				for ky := 0; ky < kernel_size; ky++ {
+			sumWholeKernel := 0
+			for kx := 0; kx < kernelSize; kx++ {
+				for ky := 0; ky < kernelSize; ky++ {
 					x := i + kx - kernelWingSize
 					y := j + ky - kernelWingSize
 					if x < bounds.Min.X || x >= bounds.Max.X || y < bounds.Min.Y || y >= bounds.Max.Y {
 						continue
 					}
 					r, g, b, _ := img.At(x, y).RGBA()
-					sumX += kernel_x[kx][ky] * int(r)
-					sumX += kernel_x[kx][ky] * int(g)
-					sumX += kernel_x[kx][ky] * int(b)
-					sumX /= 3
-					sumY += kernel_y[kx][ky] * int(r)
-					sumY += kernel_y[kx][ky] * int(g)
-					sumY += kernel_y[kx][ky] * int(b)
-					sumY /= 3
-					sumTotal += int(math.Sqrt(float64(sumX*sumX + sumY*sumY)))
+					gray := int(((r + g + b) / 3) >> (imageDefaultBitDepth - imageProcessBitDepth)) // 0~255
+					sumWholeKernel += kernel[kx][ky] * gray
 				}
-				convResult.SetGray(i, j, color.Gray{Y: uint8(sumTotal / 9)})
 			}
+			convResult.SetGray(i, j, color.Gray{Y: uint8(sumWholeKernel / 16)})
+		}
+	}
+	return convResult, nil
+}
+
+func heatMapGeneration(img image.Image) (image.Image, error) {
+	grayImg, ok := img.(*image.Gray)
+	if !ok {
+		return nil, fmt.Errorf("heatMapGeneration expects *image.Gray after smoothing")
+	}
+	kernelSize := 3
+	kernelX := [3][3]int{
+		{-1, 0, 1},
+		{-2, 0, 2},
+		{-1, 0, 1},
+	}
+	kernelY := [3][3]int{
+		{-1, -2, -1},
+		{0, 0, 0},
+		{1, 2, 1},
+	}
+	bounds := grayImg.Bounds()
+	// Zero-padding
+	// center-moving window
+	if kernelSize%2 == 0 {
+		return nil, fmt.Errorf("kernel_size must be odd")
+	}
+	kernelWingSize := kernelSize / 2
+	convResult := image.NewGray(bounds)
+	for i := bounds.Min.X; i < bounds.Max.X; i++ {
+		for j := bounds.Min.Y; j < bounds.Max.Y; j++ {
+			// Total counting index: (i-kernelWingSize : i+ kernelWingSize, j-kernelWingSize : j+ kernelWingSize)
+			sumWholeKernelX := 0
+			sumWholeKernelY := 0
+			for kx := 0; kx < kernelSize; kx++ {
+				for ky := 0; ky < kernelSize; ky++ {
+					x := i + kx - kernelWingSize
+					y := j + ky - kernelWingSize
+					if x < bounds.Min.X || x >= bounds.Max.X || y < bounds.Min.Y || y >= bounds.Max.Y {
+						continue
+					}
+					gray := int(grayImg.GrayAt(x, y).Y)
+					sumWholeKernelX += kernelX[kx][ky] * gray
+					sumWholeKernelY += kernelY[kx][ky] * gray
+				}
+			}
+			convResult.SetGray(i, j, color.Gray{Y: uint8(math.Sqrt(float64(sumWholeKernelX*sumWholeKernelX + sumWholeKernelY*sumWholeKernelY)))})
 		}
 	}
 	return convResult, nil
@@ -257,11 +294,14 @@ func heatMapGeneration(img image.Image) (image.Image, error) {
 func roiDetect(imgHeatMap image.Image) ([]int, error) {
 	//return 4 integers: minX, minY, maxX, maxY
 	bounds := imgHeatMap.Bounds()
-	multiplier := 0.6
-	minX := int(float64(bounds.Min.X) * (1 + multiplier))
-	minY := int(float64(bounds.Min.Y) * (1 + multiplier))
-	maxX := int(float64(bounds.Max.X) * multiplier)
-	maxY := int(float64(bounds.Max.Y) * multiplier)
+	width := bounds.Max.X - bounds.Min.X
+	height := bounds.Max.Y - bounds.Min.Y
+	cropSegWidth := int(float64(width)*0.6) / 2
+	cropSegHeight := int(float64(height)*0.6) / 2
+	minX := bounds.Min.X + cropSegWidth
+	minY := bounds.Min.Y + cropSegHeight
+	maxX := bounds.Max.X - cropSegWidth
+	maxY := bounds.Max.Y - cropSegHeight
 	return []int{minX, minY, maxX, maxY}, nil
 }
 
@@ -343,12 +383,18 @@ func imageProcess(targetDir string) ([]ImageHist, error) {
 			fmt.Printf("file %s is not a valid image.\n", nameWithExT)
 			continue
 		}
-		imgHeatMap, err := heatMapGeneration(img)
+		imgSmoothed, err := gaussianSmoothing(img)
+		if err != nil {
+			fmt.Printf("error smoothing image: %v\n", err)
+			continue
+		}
+		saveGrayMap(imgSmoothed, name, smoothedFolder, smoothedSaveSuffix)
+		imgHeatMap, err := heatMapGeneration(imgSmoothed)
 		if err != nil {
 			fmt.Printf("error generating heat map: %v\n", err)
 			continue
 		}
-		saveHeatMap(imgHeatMap, name)
+		saveGrayMap(imgHeatMap, name, heatMapFolder, heatMapSaveSuffix)
 		roi, err := roiDetect(imgHeatMap)
 		if err != nil {
 			fmt.Printf("error detecting ROI: %v\n", err)
@@ -504,11 +550,11 @@ func saveL1Records(l1records map[string]float64) error {
 	return nil
 }
 
-func saveHeatMap(img image.Image, name string) error {
+func saveGrayMap(img image.Image, name string, categoryFolder string, categorySuffix string) error {
 	if err := os.MkdirAll(heatMapFolder, 0o755); err != nil {
 		return err
 	}
-	saveName := filepath.Join(heatMapFolder, fmt.Sprintf("%s_%s", name, heatMapSaveSuffix))
+	saveName := filepath.Join(categoryFolder, fmt.Sprintf("%s_%s", name, categorySuffix))
 	file, err := os.Create(saveName)
 	if err != nil {
 		return fmt.Errorf("error creating heat map file: %v\n", err)

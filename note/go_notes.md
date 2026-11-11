@@ -183,6 +183,50 @@ default:
 
 在每個 `case` 裡，`typedImg` 會是該 case 指定的型別。`image.YCbCr` 是 struct 型別；`*image.YCbCr` 是指向該 struct 的指標，不是路徑。兩者是不同型別。解碼器常回傳指標型別，所以要用 `%T` 或 type switch 確認實際型別。Go 會自動處理指標 struct 的欄位存取，例如 `typedImg.SubsampleRatio`。
 
+### Type assertion：具體型別 vs「有沒有這個方法」
+
+參數常寫成 `image.Image`（介面），但有些能力只存在於**特定實作**或**有實作某方法的型別**。要用 type assertion（comma-ok）往下挖一層。兩種問法不一樣：
+
+#### 1. 斷言成具體型別——「你是不是這個型別？」
+
+```go
+grayImg, ok := img.(*image.Gray)
+if !ok {
+	return nil, fmt.Errorf("expects *image.Gray")
+}
+gray := int(grayImg.GrayAt(x, y).Y) // 0～255 的亮度欄位 Y
+```
+
+- `ok == true`：底層**正好是** `*image.Gray`（注意是指標型別；`image.Gray` 值與 `*image.Gray` 是不同型別）。
+- 斷言後才能用該型別專屬 API，例如 `GrayAt` / `SetGray`。`GrayAt` **不是** `image.Image` 介面上的方法，直接對 `img` 呼叫會編譯失敗：`img.GrayAt undefined`。
+- 本專案：`gaussianSmoothing` 回傳 `*image.Gray`（對外型別仍是 `image.Image`），`heatMapGeneration` 入口先斷言再讀灰階，避免再走 `At().RGBA()` 的 16-bit 尺度。
+
+#### 2. 斷言成匿名介面——「你有沒有這個方法？」
+
+```go
+sub, ok := img.(interface {
+	SubImage(r image.Rectangle) image.Image
+})
+if !ok {
+	// 這個具體圖不支援裁切
+}
+imgCropped := sub.SubImage(image.Rect(...))
+```
+
+- `ok == true`：不管實際是 `*image.RGBA`、`*image.YCbCr` 還是別的，**只要有 `SubImage` 方法**就通過（結構化／duck typing）。
+- 斷言後只能呼叫介面裡寫出的方法，拿不到該型別的其他專屬欄位。
+- `SubImage` 也不是 `image.Image` 的一部分，所以才需要這種「臨時介面」斷言；標準庫沒有統一的 `SubImager` 名稱，專案裡用匿名 `interface{...}` 即可。
+
+#### 對照（本專案實際用法）
+
+| | `img.(*image.Gray)` | `img.(interface{ SubImage... })` |
+|---|---|---|
+| 問的是 | 確切型別 | 方法集合 |
+| 通過條件 | 必須是 Gray | 任一有 `SubImage` 的圖 |
+| 典型用途 | 要 `GrayAt` 讀 8-bit 亮度 | 裁 ROI，不綁死解碼後的具體型別 |
+
+兩種都是 comma-ok 家族（與 map 的 `v, ok := m[k]` 同形）；差別只在括號裡寫的是「具體型別」還是「一組方法」。
+
 ### 在 debugger 裡檢視方法和結果
 
 VS Code 的 Go debugger 使用 Delve。變數展開主要顯示欄位，不會列出方法；`Bounds()`、`ColorModel()` 是方法，不是圖片 struct 裡的資料欄位。Debug Console 直接求值方法呼叫可能被拒絕（例如提示需使用 `call`），而且方法呼叫支援受 debugger 限制。

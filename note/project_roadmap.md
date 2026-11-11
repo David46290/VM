@@ -22,7 +22,7 @@
 
 **暫定對策方向**：中心主體 → 邊緣／梯度 heat map → 矩形 ROI → `SubImage` 後沿用 histogram + L1。細節見 `histogram_and_clustering.md`「中心主體 ROI」。
 
-**目前**：debug scaffold 已接上（`heatMapGeneration`、placeholder `roiDetect`、heat map／ROI 存圖、`imageProcess` 逐張管線）；**真 ROI 演算法與對照實驗尚未做**。實作自行進行。
+**目前**：`imageProcess` 已跑通 **高斯 3×3 → Sobel 3×3 heat map → placeholder ROI → SubImage → histogram**（debug 圖可目視）；觀察到薄雜訊與背景文字／尺度差問題。**真 ROI 與 L1 對照尚未做**。實作自行進行。
 
 ## 階段表
 
@@ -63,8 +63,8 @@
 - [x] 依分數排序輸出；印最近／最遠各 N 對（`l1ScoreShowAmount`）
 - [x] 人工對照（`channelBitDepth = 2`）：`bitDepth2_l1_coorelation_inspect.txt`
 - [x] `channelBitDepth = 4` 重跑＋人工修訂：`bitDepth4_l1_coorelation_inspect.txt`（假近仍在；最遠端出現同模型假遠 `214108` vs `214023`）
-- [x] ROI／heat map **debug scaffold**：`imageProcess` 逐張管線；`saveHeatMap`；placeholder `roiDetect`；`drawAndSaveRoi`（原圖＋heat map 白框）；`SubImage` 後再 `histogramExtract`
-- [ ] 真**中心主體 ROI**（`roiDetect` 依 heat map 定框）→ 重跑 L1／人工對照假近假遠 → 再進 Phase 3（`channelBitDepth=4` 可當預設候選）
+- [x] ROI／heat map **debug scaffold**：`gaussianSmoothing`（3×3）→ `heatMapGeneration`（3×3 Sobel）→ `saveGrayMap`；placeholder `roiDetect`；`drawAndSaveRoi`；`SubImage` 後 `histogramExtract`
+- [ ] 真**中心主體 ROI**（`roiDetect` 依 heat map＋中央偏置定框；處理背景文字／尺度差）→ 重跑 L1／人工對照 → 再進 Phase 3（`channelBitDepth=4` 可當預設候選）
 
 ### Phase 3 — 特徵快取與分群調參
 

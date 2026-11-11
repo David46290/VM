@@ -134,41 +134,49 @@
 - 唯一握 `image.Image` 的地方應是相簿逐張迴圈：解碼 → heat map／ROI／hist → 丟圖。已把掃目錄從 `generateHistogram` 收成 `imageProcess`。
 - `validateFile` 改走 `imaging.Decode(..., AutoOrientation(true))`，處理手機照片 EXIF 方向。
 
-#### 目前進度（placeholder + debug I/O，尚未定案真 ROI）
+#### 目前進度（高斯 + Sobel debug；ROI 仍 placeholder）
 
-管線（`imageProcess` 逐張）：
+管線（`imageProcess` 逐張；`channelBitDepth=4` 為預設候選）：
 
 ```
 validateFile
-  → heatMapGeneration（目前：3×3 Sobel 風格 kernel → Gray）
-  → saveHeatMap
-  → roiDetect（目前：幾何 placeholder，非整張 heat map 門檻框選）
+  → gaussianSmoothing（3×3 高斯 → *image.Gray）
+  → saveGrayMap（smoothed）
+  → heatMapGeneration（對平滑圖做 3×3 Sobel → Gray 邊緣強度）
+  → saveGrayMap（heatmap_from_smoothed）
+  → roiDetect（幾何 placeholder，尚未依 heat map 定框）
   → drawAndSaveRoi（原圖 + heat map 上畫白框）
   → SubImage(roi) → histogramExtract（框內 histogram）
 ```
 
 | 函式 | 狀態 | 說明 |
 |---|---|---|
-| `heatMapGeneration` | 已接上、可存圖 | 全圖卷積成灰度「邊緣強度」圖；算法細節／正規化仍可再修，先當 debug 特徵圖 |
-| `roiDetect` | **placeholder** | 回傳 `[]int{minX,minY,maxX,maxY}`；現況用 bounds 比例（約 0.6）切中央區，**尚未**依 heat map 高響應像素定框 |
-| `drawRoi`／`drawAndSaveRoi`／`saveRoiMarking` | 可用 | 白框疊在原圖與 heat map，方便目視框有沒有歪 |
-| `saveHeatMap` | 可用 | JPEG 寫出 heat map |
-| `ImageHist.ROI` 欄位 | **尚未** | ROI 仍是迴圈內區域變數；之後若要快取／重跑 L1 再掛進 struct |
+| `gaussianSmoothing` | 已接上、可存圖 | kernel 3×3；輸出 `*image.Gray`（對外仍 `image.Image`） |
+| `heatMapGeneration` | 已接上、可存圖 | 入口 type assert 成 `*image.Gray` 後做 Sobel；預期吃平滑後的圖 |
+| `saveGrayMap` | 可用 | 共用存灰階／特徵 JPEG（smoothed 與 heat map 都走它） |
+| `roiDetect` | **placeholder** | 回傳 `[]int{minX,minY,maxX,maxY}`；bounds 比例切中央，**尚未**依邊緣響應定框 |
+| `drawRoi`／`drawAndSaveRoi`／`saveRoiMarking` | 可用 | 白框疊在原圖與 heat map |
+| `ImageHist.ROI` 欄位 | **尚未** | ROI 仍是迴圈內變數 |
 
-**Debug 產物**（皆在 `output/`，已 `.gitignore`，不進 git）：
+**Debug 產物**（皆在 `output/`，已 `.gitignore`；小樣本可用 `imagesQuickDebug/`，亦已 ignore）：
 
 | 路徑 | 內容 |
 |---|---|
-| `output/debug/heatmap/<name>_heatmap.jpg` | 特徵／邊緣 heat map |
+| `output/debug/smoothed/<name>_smoothed.jpg` | 高斯模糊結果 |
+| `output/debug/heatmap/<name>_heatmap_from_smoothed.jpg` | 平滑後再 Sobel 的邊緣圖 |
 | `output/debug/roi/<name>/<name>_og_roi.jpg` | 原圖 + ROI 白框 |
 | `output/debug/roi/<name>/<name>_heatmap_roi.jpg` | heat map + ROI 白框 |
 | `output/debug/histogram/...`、`l1_coorelate/...` | 既有 histogram／L1 文字產物 |
 
-設計取捨（已採）：先打通**存圖 I/O + placeholder**，再換真正「依梯度定 ROI」；目視驗收靠「全圖 heat map + 框」，不只看裁切圖。
+**目視觀察（2026-11-11，3×3 高斯 → 3×3 Sobel）**：
 
-**下一步（真算法，未做）**：讓 `roiDetect` 吃 heat map（中央附近高響應像素 → 矩形），再重跑 L1 最近／最遠對照假近／假遠是否改善。
+- 平滑後再 Sobel：厚雜訊有降，但非邊緣區仍常留「薄灰塵」弱響應。
+- **更嚴重**：背景高頻結構（螢幕程式碼、硬體標字等）邊緣很強；只靠「複雜度高＝主體」定 ROI **不穩**。
+- 主體尺度差大（例如中央小模型 vs 幾乎佔滿水平的構圖）；固定比例預裁／placeholder 框容易切到或漏掉。中央先驗宜偏**軟權重**，硬範圍別太死。加大模糊或改 Canny／Laplacian 可當調參，但**別期待單獨解決螢幕文字**。
 
-**驗證目標**：假近（不同模型同舞台）與假遠（同模型換場／濾鏡）是否比全圖 L1 改善；仍用最近／最遠 N 對人工對照。
+**下一步（未做）**：`roiDetect` 真的吃 heat map（加中央偏置）→ 重跑 L1 對照假近／假遠；尺度與背景文字策略另定。
+
+**驗證目標**：假近與假遠是否比全圖 L1 改善；仍用最近／最遠 N 對人工對照。
 
 ## 距離函式（Phase 2）
 
@@ -253,7 +261,7 @@ Phase 2 補答（4 bit）：
 
 - `channelBitDepth = 4` 可當後續預設解析度候選；**單靠調 bit 無法達「同模型歸群」**。
 - 若目標是「同場連拍歸一群」→ 目前特徵仍有用。若目標是「同一隻模型歸一群」→ 必須處理背景／色調或換特徵（假近＋假遠都要顧）。
-- 具體做法見「中心主體 ROI」；debug scaffold（heat map／ROI 存圖 + placeholder 框）已接上，**真 roiDetect 與假近／假遠重跑尚未做**。多物體場景留到後續。ROI 驗證過後再進 Phase 3；**仍先不要上 EMD**。
+- 具體做法見「中心主體 ROI」；已接上 **3×3 高斯 → 3×3 Sobel** debug 與 placeholder 框，**真 roiDetect 與假近／假遠重跑尚未做**。多物體與螢幕文字干擾另議。ROI 驗證過後再進 Phase 3；**仍先不要上 EMD**。
 
 ## 特徵快取（Phase 3）
 
