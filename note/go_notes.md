@@ -352,6 +352,67 @@ keys := slices.SortedFunc(maps.Keys(m), func(a, b string) int {
 
 對應 Python 的直覺大致是 `sorted(m.keys(), key=lambda k: (m[k], k))`，但 Go 把「取出 keys／比較／排序」拆成標準庫幾個小函式組合。
 
-## 錯誤處理的分層
+## 錯誤處理的分層與 `os.Exit`
 
-做事的函式（`generateHistogram`、`saveHistogramFile`）只 `return error`；站在程式邊界的 `main` 決定要不要 `os.Exit`。不要在中層 `log.Fatalf`——呼叫端會以為自己能處理錯誤，其實行程已經死了。錯誤訊息慣例小寫開頭（會被上層再包一層印出）。
+做事的函式（`imageProcess`、`saveHistogramFile` 等）只 `return error`；站在程式邊界的 `main` 決定要不要 `os.Exit`。不要在中層 `log.Fatalf`——呼叫端會以為自己能處理錯誤，其實行程已經死了。錯誤訊息慣例小寫開頭（會被上層再包一層印出）。
+
+### `os.Exit(code)` 是什麼？
+
+立刻結束整個行程，並回傳**結束代碼**給終端機／腳本／CI。Python 對應概念大致是 `sys.exit(code)`。
+
+| code | 慣例意思 | 本專案用法 |
+|---|---|---|
+| `0` | 成功／預期內結束 | 依 `-stopStage` **刻意**停在某階段 |
+| 非 `0`（常用 `1`） | 失敗 | 階段名打錯、設定錯、讀圖／存檔／L1 出錯 |
+
+PowerShell 可用 `$LASTEXITCODE` 查看。注意：`os.Exit` 會馬上死掉，`defer` 不一定有機會跑完；預期停止用 `0`，真錯誤用非 `0`，別反過來。
+
+## 命令列 flag（CLI）
+
+不想每次改碼註解就能「只跑到 heat map」時，用標準庫 `flag` 讓使用者在啟動時下指令。這叫 CLI（Command Line Interface），不是 GUI。
+
+### `flag.String`／`flag.Bool` 回傳什麼？
+
+兩者都回傳**指標**；要加 `*` 才讀得到值。第 3 個字串只是 `go run . -h` 的說明，**不會**自動驗證合法值。
+
+```go
+stopStage := flag.String("stopStage", "heatmap", "stop at: smoothed|heatmap|roi|hist|l1")
+skipL1 := flag.Bool("skip-l1", false, "skip L1 correlation")
+flag.Parse() // 一定要先 Parse，命令列才會寫進指標指向的內容
+
+fmt.Println(*stopStage, *skipL1)
+```
+
+| 引數位置 | `String` 例子 | 意義 |
+|---|---|---|
+| 1 | `"stopStage"` | 名字 → 命令列 `-stopStage smoothed` |
+| 2 | `"heatmap"` | **預設值**（沒傳 flag 時） |
+| 3 | `"stop at: ..."` | 說明文字 |
+
+布林：`go run . -skip-l1` 出現即為 `true`。
+
+### 踩過的坑：先查表再 `Parse`
+
+```go
+// 錯：Parse 前 *stopStage 仍是預設 "heatmap"，索引被鎖死
+stopStage := flag.String("stopStage", "heatmap", "...")
+idx := stageOptions[*stopStage]
+flag.Parse()
+
+// 對：先 Parse，再查表
+stopStage := flag.String("stopStage", "heatmap", "...")
+flag.Parse()
+idx := stageOptions[*stopStage]
+```
+
+### 本專案：`-stopStage` 怎麼接到管線
+
+flag 是**啟動時的輸入**，跑的過程中不要改寫它，也不要用「把 skip 設成 true」來中斷。
+
+1. 自訂階段順序表（從 1 起跳，讓 map 缺 key 的零值 0 能代表非法）：
+   `smoothed=1, heatmap=2, roi=3, hist=4, l1=5`
+2. `Parse` 後把字串轉成數字；`== 0` 當打錯字。
+3. `imageProcess` 每做完一步就 `if stageIdx >= stopStageIdx { continue }`——少做後面的步驟，不是改 flag。
+4. `main` 裡 L1 同樣用數字比較；刻意停 → `os.Exit(0)`。
+
+執行例：`go run . -stopStage smoothed`（參數放在 package 路徑後面，才會進程式而不是被 `go` 自己吃掉）。

@@ -2,6 +2,7 @@ package main
 
 import (
 	"cmp"
+	"flag"
 	"fmt"
 	"image"
 	"image/color"
@@ -46,6 +47,7 @@ var (
 	roiContourThickness = 2
 	smoothedFolder      = "output/debug/smoothed"
 	smoothedSaveSuffix  = "smoothed.jpg"
+	stageOptions        = map[string]int{"smoothed": 1, "heatmap": 2, "roi": 3, "hist": 4, "l1": 5}
 )
 
 type ImageHist struct {
@@ -362,14 +364,14 @@ func drawAndSaveRoi(imgOriginal image.Image, imgHeatMap image.Image, roi []int, 
 	return nil
 }
 
-func imageProcess(targetDir string) ([]ImageHist, error) {
+func imageProcess(targetDir string, stopStageIdx int) ([]ImageHist, int, error) {
 	entries, err := os.ReadDir(targetDir)
 	if err != nil {
-		return nil, fmt.Errorf("can't read target folder: %v\n", err)
+		return nil, 0, fmt.Errorf("can't read target folder: %v\n", err)
 	}
-
 	albumHisto := []ImageHist{}
 	start := time.Now()
+	stageIdx := 0
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -389,12 +391,22 @@ func imageProcess(targetDir string) ([]ImageHist, error) {
 			continue
 		}
 		saveGrayMap(imgSmoothed, name, smoothedFolder, smoothedSaveSuffix)
+		stageIdx = stageOptions["smoothed"]
+		if stageIdx >= stopStageIdx {
+			continue
+		}
+
 		imgHeatMap, err := heatMapGeneration(imgSmoothed)
 		if err != nil {
 			fmt.Printf("error generating heat map: %v\n", err)
 			continue
 		}
 		saveGrayMap(imgHeatMap, name, heatMapFolder, heatMapSaveSuffix)
+		stageIdx = stageOptions["heatmap"]
+		if stageIdx >= stopStageIdx {
+			continue
+		}
+
 		roi, err := roiDetect(imgHeatMap)
 		if err != nil {
 			fmt.Printf("error detecting ROI: %v\n", err)
@@ -412,6 +424,11 @@ func imageProcess(targetDir string) ([]ImageHist, error) {
 			fmt.Printf("error drawing and saving roi: %v\n", err)
 			continue
 		}
+		stageIdx = stageOptions["roi"]
+		if stageIdx >= stopStageIdx {
+			continue
+		}
+
 		imgCropped := sub.SubImage(image.Rect(roi[0], roi[1], roi[2], roi[3]))
 		imageHist, err := histogramExtract(path, imgCropped, format)
 		if err != nil {
@@ -423,8 +440,8 @@ func imageProcess(targetDir string) ([]ImageHist, error) {
 
 	elapsed := time.Since(start)
 	fmt.Printf("Number of images in target folder: %d\n", len(albumHisto))
-	fmt.Printf("Histogram generation time: %v\n", elapsed)
-	return albumHisto, nil
+	fmt.Printf("Image processing time: %v\n", elapsed)
+	return albumHisto, stageIdx, nil
 }
 
 func saveHistogramFile(imageHist ImageHist) error {
@@ -551,45 +568,64 @@ func saveL1Records(l1records map[string]float64) error {
 }
 
 func saveGrayMap(img image.Image, name string, categoryFolder string, categorySuffix string) error {
-	if err := os.MkdirAll(heatMapFolder, 0o755); err != nil {
+	if err := os.MkdirAll(categoryFolder, 0o755); err != nil {
 		return err
 	}
 	saveName := filepath.Join(categoryFolder, fmt.Sprintf("%s_%s", name, categorySuffix))
 	file, err := os.Create(saveName)
 	if err != nil {
-		return fmt.Errorf("error creating heat map file: %v\n", err)
+		return fmt.Errorf("error creating %s file: %v\n", categorySuffix, err)
 	}
 	defer file.Close()
 	err = jpeg.Encode(file, img, nil)
 	if err != nil {
-		return fmt.Errorf("error encoding heat map: %v\n", err)
+		return fmt.Errorf("error encoding %s: %v\n", categorySuffix, err)
 	}
-	fmt.Printf("Heat map saved to %s\n", saveName)
+	fmt.Printf("%s saved to %s\n", categorySuffix, saveName)
 	return nil
 }
 
 func main() {
+	stopStageString := flag.String("stopStage", "heatmap", "stop at stage: smoothed|heatmap|roi|hist|l1")
+	flag.Parse()
+	stopStageIdx := stageOptions[*stopStageString]
+
+	if stopStageIdx == 0 {
+		fmt.Printf("Wrong stage name: %s\nShutting down...", *stopStageString)
+		os.Exit(1)
+	}
+
 	if err := checkSettings(); err != nil {
 		fmt.Printf("Invalid settings: %v\n\n", err)
 		os.Exit(1)
 	}
-
 	currentDir, _ := os.Getwd()
 	targetDir, _ := filepath.Abs(targetFolder)
 	fmt.Printf("Current working directory: %s\n", currentDir)
 	fmt.Printf("Target folder: %s\n", targetDir)
 	fmt.Printf("Channel bits: %d\n", channelBitDepth)
 
-	albumHisto, histoErr := imageProcess(targetDir)
+	albumHisto, stageIdx, histoErr := imageProcess(targetDir, stopStageIdx)
 	if histoErr != nil {
 		fmt.Printf("error generating histogram: %v\n\n", histoErr)
 		os.Exit(1)
 	}
+	if stageIdx >= stopStageIdx {
+		fmt.Printf("Stop at stage: %s\n", *stopStageString)
+		os.Exit(0)
+	}
+
 	saveErr := saveHistogram(albumHisto)
 	if saveErr != nil {
 		fmt.Printf("error saving histogram: %v\n\n", saveErr)
 		os.Exit(1)
 	}
+	stageIdx = stageOptions["hist"]
+	if stageIdx >= stopStageIdx {
+		fmt.Printf("Stop at stage: %s\n", *stopStageString)
+		os.Exit(0)
+	}
+
 	l1records, l1Err := correlateHistL1(albumHisto)
 	if l1Err != nil {
 		fmt.Printf("error correlating histogram: %v\n\n", l1Err)
